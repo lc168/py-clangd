@@ -1,3 +1,13 @@
+import os
+from .cindex import Config
+
+# 手动指定你编译出来的 LLVM 22 库路径
+# 也可以通过 VS Code 的 settings.json 传进来
+LIB_CLANG_PATH = "/home/lc/llvm-project/build/lib" 
+
+if os.path.exists(LIB_CLANG_PATH):
+    Config.set_library_path(LIB_CLANG_PATH)
+
 from pygls.server import LanguageServer
 from lsp_types import Location, Range, Position
 from server.cindex import Index, Cursor
