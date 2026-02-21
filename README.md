@@ -45,13 +45,14 @@ AI 虽然聪明，但它读 200 万行代码会变慢且贵。
 
 ```text
 PyClangd/
-├── server/           # Python 语言服务器 (Backend)
-│   ├── cindex.py     # LLVM 22 Python Bindings
-│   ├── database.py   # SQLite 索引逻辑
-│   ├── indexer.py    # 项目符号扫描器
-│   └── server.py     # LSP 协议实现
-├── vscode/           # VS Code 扩展 (Frontend)
-│   ├── src/          # TypeScript 源码
-│   └── package.json  # 插件元数据
-└── pyclangd_index.db # 运行生成的索引数据库
+└── vscodePlug/       # VS Code 扩展（含后端与 venv，便于安装/打包）
+    ├── server/       # Python 语言服务器 (Backend)
+    │   ├── cindex.py # LLVM Python Bindings
+    │   ├── database.py
+    │   └── server.py # LSP 协议 + 索引
+    ├── venv/         # Python 虚拟环境（随扩展打包）
+    ├── src/          # TypeScript 源码
+    └── package.json  # 插件元数据
 ```
+
+使用插件前请在设置中配置 **pyclangd.libraryPath**（libclang 库目录，必填），例如 `/home/xxx/llvm22/lib`。

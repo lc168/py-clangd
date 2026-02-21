@@ -20,7 +20,17 @@
         "command": "vscode.helloWorld",
         "title": "Hello World"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "PyClangd",
+      "properties": {
+        "pyclangd.libraryPath": {
+          "type": "string",
+          "default": "",
+          "description": "libclang 库目录路径（必填），例如 /home/xxx/llvm22/lib。PyClangd 依赖此路径加载 libclang。"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
