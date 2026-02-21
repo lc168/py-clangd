@@ -40,36 +40,32 @@ const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
 let client;
 function activate(context) {
-    // 关键点：server.py 的相对位置是从编译后的 out/extension.js 开始算的
-    // 所以路径是 ../../server/server.py
-    // const serverModule = context.asAbsolutePath(
-    // 	path.join('..', 'server', 'server.py')
-    // );
-    // 获取虚拟环境中的 Python 路径
-    // 假设你的目录结构是:
-    // PyClangd/
-    // ├── venv/
-    // ├── server/
-    // └── vscode/
-    // 这里的路径根据你的实际存放位置调整，重点是找到 venv/bin/python
-    const pythonPath = context.asAbsolutePath(path.join('..', 'venv', 'bin', 'python'));
-    const serverModule = context.asAbsolutePath(path.join('..', 'server', 'server.py'));
+    // 扩展安装目录（内含 server/、venv/）
+    const extPath = context.extensionPath;
+    const pythonPath = path.join(extPath, 'venv', 'bin', 'python');
+    const serverModule = path.join(extPath, 'server', 'server.py');
+    const libPath = vscode.workspace.getConfiguration('pyclangd').get('libraryPath', '').trim();
+    if (!libPath) {
+        vscode.window.showErrorMessage('PyClangd: 请先设置 libclang 库路径。打开设置，搜索 "pyclangd.libraryPath"，填写例如 /home/xxx/llvm22/lib 的路径。');
+        return;
+    }
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : extPath;
     const serverOptions = {
-        command: pythonPath, // 使用虚拟环境中的 Python 路径
-        args: [serverModule],
+        command: pythonPath,
+        args: [serverModule, '-d', workspaceRoot, '-s', '-l', libPath],
         options: {
             env: {
                 ...process.env,
-                // 确保 Python 能够找到 server 目录下的 database.py 和 cindex.py
-                PYTHONPATH: context.asAbsolutePath(path.join('..'))
-            }
-        }
+                PYTHONPATH: path.join(extPath, 'server'),
+            },
+        },
     };
     const clientOptions = {
         documentSelector: [
             { scheme: 'file', language: 'cpp' },
-            { scheme: 'file', language: 'c' }
-        ]
+            { scheme: 'file', language: 'c' },
+        ],
     };
     client = new node_1.LanguageClient('pyclangd', 'PyClangd Language Server', serverOptions, clientOptions);
     client.start();
