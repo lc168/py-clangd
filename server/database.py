@@ -1,10 +1,11 @@
 import sqlite3
 import os
 
+
 class IndexDatabase:
-    def __init__(self):
-        # 数据库存放在 server 目录下
-        db_path = os.path.join(os.path.dirname(__file__), "pyclangd_index.db")
+    def __init__(self, db_path=None):
+        if db_path is None:
+            db_path = os.path.join(os.path.dirname(__file__), "pyclangd_index.db")
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
         self._setup()

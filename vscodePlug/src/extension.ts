@@ -26,10 +26,13 @@ export function activate(context: vscode.ExtensionContext) {
 	// 这里的路径根据你的实际存放位置调整，重点是找到 venv/bin/python
 	const pythonPath = context.asAbsolutePath(path.join('..', 'venv', 'bin', 'python'));
 	const serverModule = context.asAbsolutePath(path.join('..', 'server', 'server.py'));
+	// 工作区根目录：用于 -d；无工作区时用项目根
+	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+	const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : context.asAbsolutePath(path.join('..'));
 
 	const serverOptions: ServerOptions = {
 		command: pythonPath, // 使用虚拟环境中的 Python 路径
-		args: [serverModule],
+		args: [serverModule, '-d', workspaceRoot, '-s'],
 		options: {
 			env: {
 				...process.env,
