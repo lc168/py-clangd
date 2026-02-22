@@ -107,6 +107,8 @@ def run_index_mode(workspace_dir, lib_path):
 
 # ---------- 模式1: LSP 服务 (stdin/stdout JSON-RPC) ----------
 def _read_lsp_message(stream):
+    ls.show_message_log(f"--- 触发跳转调试 ---")
+    ls.show_message_log(f"收到请求 URI: {params.text_document.uri}")
     """读取一条 Content-Length 形式的 LSP 消息。stream 应为二进制模式以保证按字节读取。"""
     buf = getattr(stream, "buffer", stream)
     line = buf.readline()
