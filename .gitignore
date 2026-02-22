@@ -1,2 +1,6 @@
 # 忽略 Python 虚拟环境
 venv/
+out/
+# 忽略 Python 编译缓存
+**/__pycache__/
+*.pyc
