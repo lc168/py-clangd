@@ -188,6 +188,62 @@ def lsp_workspace_symbols(server: PyClangdServer, params):
                                                           end=Position(line=sl-1, character=sc-1+len(n))))
     ) for n, fp, sl, sc, usr in results]
 
+
+import re
+
+# 在 PyClangdServer 类中修改或添加定义跳转函数
+@ls.feature(TEXT_DOCUMENT_DEFINITION)
+def lsp_definition(server: PyClangdServer, params):
+    """跳转到定义：纯数据库查表，0 毫秒解析延迟"""
+    uri = params.text_document.uri
+    file_path = os.path.normpath(uri.replace("file://", ""))
+    line_idx = params.position.line
+    col_idx = params.position.character
+
+    try:
+        # 1. 直接读取本地文件提取单词
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+            if line_idx >= len(lines): return None
+            current_line = lines[line_idx]
+            
+            # 使用正则从光标位置向前后扩展，提取完整的标识符
+            # 匹配字母、数字、下划线
+            word_match = None
+            for m in re.finditer(r'[a-zA-Z_][a-zA-Z0-9_]*', current_line):
+                if m.start() <= col_idx <= m.end():
+                    word_match = m.group()
+                    break
+            
+            if not word_match:
+                return None
+
+        # 2. 拿着单词直接去数据库里“撞”
+        # 这里的速度是索引级的，对于 Linux 内核这种量级也是瞬间完成
+        results = server.db.get_definitions_by_name(word_match)
+        
+        if not results:
+            return None
+
+        # 3. 构造返回位置
+        locations = []
+        for fp, sl, sc, el, ec in results:
+            locations.append(Location(
+                uri=f"file://{fp}",
+                range=Range(
+                    start=Position(line=sl-1, character=sc-1),
+                    end=Position(line=el-1, character=ec-1)
+                )
+            ))
+        
+        # 如果有多个重名定义（比如不同结构体里的同名成员），VS Code 会弹出一个列表供用户选择
+        return locations
+
+    except Exception as e:
+        logger.error(f"跳转定义失败: {e}")
+        return None
+
+
 # --- 逻辑控制 ---
 def run_index_mode(workspace_dir, lib_path, jobs):
     """主动索引模式"""

@@ -85,6 +85,15 @@ class Database:
             FROM symbols WHERE file_path = ? ORDER BY s_line ASC
         ''', (file_path,))
         return self.cursor.fetchall()
+    
+    def get_definitions_by_name(self, name):
+        """核心查询：根据符号名称直接秒查定义位置（函数定义跳转）"""
+        # 利用 symbols 表的索引实现 O(log N) 级别的极速查询
+        self.cursor.execute('''
+            SELECT file_path, s_line, s_col, e_line, e_col 
+            FROM symbols WHERE name = ?
+        ''', (name,))
+        return self.cursor.fetchall()
 
     def close(self):
         self.conn.close()
