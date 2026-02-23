@@ -16,7 +16,7 @@ let outputChannel: vscode.OutputChannel;
 
 export function activate(context: vscode.ExtensionContext) {
 
-	vscode.window.showErrorMessage('!!! 插件正在激活 !!!');
+	//vscode.window.showErrorMessage('!!! 插件正在激活 !!!');
     // 2. 创建输出通道
     outputChannel = vscode.window.createOutputChannel("PyClangd Info");
 

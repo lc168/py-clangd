@@ -1,186 +1,266 @@
-#!/usr/bin/env python3
-import argparse
-import logging
 import os
 import sys
+import logging
+import multiprocessing
 import json
-from urllib.parse import urlparse, unquote
-from pathlib import Path
+import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# pygls 1.3.1 适配的导入
-from pygls.server import LanguageServer
-from lsprotocol.types import (
-    TEXT_DOCUMENT_DEFINITION,
-    Location,
-    Range,
-    Position,
-    MessageType  # 必须导入 MessageType 枚举
-)
+try:
+    from pygls.server import LanguageServer
+    from lsprotocol.types import (
+        TEXT_DOCUMENT_DEFINITION, TEXT_DOCUMENT_DOCUMENT_SYMBOL, WORKSPACE_SYMBOL,
+        Location, Range, Position, SymbolInformation, SymbolKind, DocumentSymbol, MessageType
+    )
+except ImportError as e:
+    print(f"Error: 缺少基础库 {e}, 请执行 pip install pygls lsprotocol", file=sys.stderr)
+    sys.exit(1)
 
-# 导入 cindex，注意这里添加了 Cursor
+from database import Database
 from cindex import Index, Cursor, CursorKind, Config
-from database import IndexDatabase
 
-# 强制日志输出到 stderr
-logging.basicConfig(
-    level=logging.INFO, 
-    stream=sys.stderr, 
-    format='%(asctime)s [%(levelname)s] %(message)s'
-)
+# 日志定向到 stderr，VS Code 才能在输出窗口显示
+logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(levelname)s: %(message)s')
 logger = logging.getLogger("PyClangd")
 
+# --- 独立 Worker 函数 (必须定义在顶层以支持序列化) ---
+def index_worker(cmd_info, lib_path, db_path):
+    """
+    单文件索引任务：由子进程调用
+    """
+    # --- 1. 路径预处理：使用 realpath 消除软链接影响 ---
+    directory = cmd_info.get('directory', '')
+    file_rel = cmd_info.get('file', '')
+    source_file = os.path.realpath(os.path.join(directory, file_rel)) #
+    
+    # 暂时跳过汇编文件
+    if source_file.endswith(('.S', '.s')):
+        logger.info(f"跳过汇编文件: {source_file}")
+        return True
+
+    if not os.path.exists(source_file):
+        # 遇到错误，向父进程返回“毒药”字符串
+        logger.critical(f"File not found: {source_file}")
+        return "FATAL_ERROR"
+
+    db = Database(db_path)
+    idx = Index.create()
+
+    # --- 2. 终极参数清洗：精准剔除毒药参数 ---
+    raw_args = cmd_info.get('arguments', [])
+    # 提取源文件的纯文件名，比如 "bin2c.c"
+    source_basename = os.path.basename(source_file)
+
+    compiler_args = []
+    skip_next = False  # ⭐ 必须要有这个状态位！
+
+    for arg in raw_args[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+            
+        # 1. 彻底干掉输出指令 -o 及其后面的文件名
+        if arg == '-o':
+            skip_next = True
+            continue
+            
+        # 2. 干掉编译动作指令 -c 和 -S
+        if arg in ('-c', '-S'):
+            continue
+            
+        # 3. 干掉重复的源文件
+        if os.path.basename(arg) == source_basename:
+            continue
+            
+        # 4. 干掉 Clang 不认识的 GCC 专属参数
+        if arg in ('-fconserve-stack', '-fno-var-tracking-assignments') or arg.startswith('-mabi='):
+            continue
+        
+        compiler_args.append(arg)
+
+    compiler_args.append('-fsyntax-only')
+    # ⭐ 新增：解除错误数量限制！哪怕有 1000 个不认识的 GCC 参数，也要把 AST 树给我建完！
+    compiler_args.append('-ferror-limit=0')
+
+    # ⭐ 新增：动态识别交叉编译架构 (从 raw_args[0] 也就是编译器名称中提取)
+    compiler_path = raw_args[0] if raw_args else ''
+    if 'aarch64' in compiler_path or 'arm64' in compiler_path:
+        compiler_args.append('--target=aarch64-linux-gnu')
+    elif 'arm' in compiler_path:
+        compiler_args.append('--target=arm-linux-gnueabihf')
+
+    # ⭐ 核心修复：强行注入 LLVM 22 的内置头文件路径
+    # 请把下面的路径替换成你用 ls 真实看到的路径
+    builtin_includes = '/home/lc/llvm22/lib/clang/22/include' 
+    compiler_args.append('-isystem')
+    compiler_args.append(builtin_includes)
+
+    try:
+        # 解析时传入清洗后的参数
+        logger.info(f"正在编译1[{source_file}]: args={compiler_args}")
+        # 开启 0x01 (DetailedPreprocessingRecord) 以支持宏分析
+        tu = idx.parse(source_file, args=compiler_args, options=0x01)
+        logger.info(f"正在编译2")
+        # 调试：检查解析是否有致命错误
+        for diag in tu.diagnostics:
+            if diag.severity >= 3: # 严重错误或致命错误
+                logger.error(f"解析警告/错误 [{source_file}]: {diag}")
+                # 遇到错误，向父进程返回“毒药”字符串
+                return "FATAL_ERROR"
+
+# ⭐ 新增：准备两个内存列表来装数据，绝不提前写库！
+        defs_to_insert = []
+        calls_to_insert = []
+        current_func_usr = None
+
+        for node in tu.cursor.walk_preorder():
+            if node.location.file:
+                node_file = os.path.realpath(node.location.file.name) 
+                if not os.path.samefile(node.location.file.name, source_file):
+                   continue
+                
+                # 收集符号定义
+                if node.is_definition() and node.kind in (
+                    CursorKind.FUNCTION_DECL, CursorKind.CXX_METHOD,
+                    CursorKind.STRUCT_DECL, CursorKind.CLASS_DECL,
+                    CursorKind.VAR_DECL, CursorKind.MACRO_DEFINITION
+                ):
+                    current_func_usr = node.get_usr()
+                    # 存入列表，而不是直接调 db
+                    defs_to_insert.append((
+                        current_func_usr, node.spelling, node.kind.value, source_file,
+                        node.extent.start.line, node.extent.start.column,
+                        node.extent.end.line, node.extent.end.column
+                    ))
+
+                # 收集调用关系
+                if node.kind == CursorKind.CALL_EXPR and current_func_usr:
+                    callee = node.referenced
+                    if callee:
+                        # 存入列表
+                        calls_to_insert.append((
+                            current_func_usr, callee.get_usr(), source_file, node.location.line
+                        ))
+
+        # ⭐ 所有的纯计算都做完了，最后花 1 毫秒瞬间砸进数据库！
+        db.batch_insert(defs_to_insert, calls_to_insert)
+        return True
+    except Exception as e:
+        # ⭐ 强行打印真正的异常原因！
+        logger.critical(f"[{source_file}] index_worker 抛出异常: {repr(e)}")
+        # 遇到错误，向父进程返回“毒药”字符串
+        return "FATAL_ERROR"
+    finally:
+        db.close()
+
+# --- LSP 服务端类 ---
 class PyClangdServer(LanguageServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.db = None
-        self.file_args_map = {}
-        self.lib_path = ""
 
-ls = PyClangdServer("pyclangd", "0.0.1")
+ls = PyClangdServer("pyclangd", "1.0.0")
 
-# ---------- 辅助工具 ----------
+@ls.feature(TEXT_DOCUMENT_DOCUMENT_SYMBOL)
+def lsp_document_symbols(server: PyClangdServer, params):
+    """大纲视图：从数据库秒级查询"""
+    file_path = os.path.normpath(params.text_document.uri.replace("file://", ""))
+    results = server.db.get_symbols_by_file(file_path)
+    
+    symbols = []
+    for name, kind_id, sl, sc, el, ec in results:
+        kind_map = {CursorKind.FUNCTION_DECL.value: SymbolKind.Function, 
+                    CursorKind.VAR_DECL.value: SymbolKind.Variable,
+                    CursorKind.MACRO_DEFINITION.value: SymbolKind.Constant}
+        kind = kind_map.get(kind_id, SymbolKind.Field)
+        
+        rng = Range(start=Position(line=sl-1, character=sc-1), end=Position(line=el-1, character=ec-1))
+        symbols.append(DocumentSymbol(name=name, kind=kind, range=rng, selection_range=rng, children=[]))
+    return symbols
 
-def _uri_to_path(uri):
-    parsed = urlparse(uri)
-    return os.path.normpath(unquote(parsed.path))
+@ls.feature(WORKSPACE_SYMBOL)
+def lsp_workspace_symbols(server: PyClangdServer, params):
+    """全局符号搜索：Ctrl+T"""
+    results = server.db.search_symbols(params.query)
+    return [SymbolInformation(
+        name=n, kind=SymbolKind.Function,
+        location=Location(uri=f"file://{fp}", range=Range(start=Position(line=sl-1, character=sc-1), 
+                                                          end=Position(line=sl-1, character=sc-1+len(n))))
+    ) for n, fp, sl, sc, usr in results]
 
-def _load_compile_commands(workspace_dir):
-    path = os.path.join(workspace_dir, "compile_commands.json")
-    if not os.path.exists(path):
-        return None
-    with open(path, "r") as f:
-        return json.load(f)
-
-def _build_file_args_map(commands):
-    result = {}
-    for cmd in commands:
-        path = cmd.get("file")
-        if not path: continue
-        args = cmd.get("arguments")
-        result[path] = list(args)[1:-1] if args else cmd.get("command", "").split()[1:-1]
-    return result
-
-# ---------- 模式 2: 索引模式 ----------
-
-def run_index_mode(workspace_dir, lib_path):
+# --- 逻辑控制 ---
+def run_index_mode(workspace_dir, lib_path, jobs):
+    """主动索引模式"""
     db_path = os.path.join(workspace_dir, "pyclangd_index.db")
+    #删除之前的旧的pyclangd_index.db 文件
     if os.path.exists(db_path):
-        logger.error(f"删除pyclangd_index.db")
         os.remove(db_path)
 
-    # 必须在 Index.create() 之前设置
-    if lib_path:
-        Config.set_library_path(lib_path)
+    cc_path = os.path.join(workspace_dir, "compile_commands.json")
+    if not os.path.exists(cc_path):
+        logger.error("未找到 compile_commands.json")
+        return
 
-    commands = _load_compile_commands(workspace_dir)
-    if not commands:
-        logger.error(f"未找到编译数据库")
-        return 1
+    with open(cc_path, 'r') as f:
+        commands = json.load(f)
 
-    index = Index.create()
-    db = IndexDatabase(db_path)
-    
-    for i, cmd in enumerate(commands):
-        source_file = cmd.get("file")
-        if not source_file: continue
-        compiler_args = list(cmd.get("arguments", []))[1:-1] or cmd.get("command", "").split()[1:-1]
-        
-        try:
-            tu = index.parse(source_file, args=compiler_args)
-            for node in tu.cursor.walk_preorder():
-                if node.kind in (CursorKind.FUNCTION_DECL, CursorKind.CXX_METHOD):
-                    if node.is_definition() and node.location.file:
-                        db.record_definition(node.get_usr(), node.spelling, node.location.file.name, node.location.line, node.location.column)
-        except Exception as e:
-            logger.error(f"索引失败: {e}")
-    return 0
+    # 按照你的要求：手动控制 jobs
+    if jobs <= 0:
+        logger.error("请注意 jobs <= 0 所以强制max_workers = 1")
+        max_workers = 1
+    else:
+        max_workers = jobs
 
-# ---------- 模式 1: LSP 模式 ----------
+    # ⭐ 新增：主进程负责提前建表并开启 WAL 模式！
+    logger.info("主进程正在初始化数据库表结构...")
+    init_db = Database(db_path, is_main=True)
+    init_db.close() # 建完表立刻释放锁
 
-@ls.feature(TEXT_DOCUMENT_DEFINITION)
-def lsp_definition(server: PyClangdServer, params):
-    uri = params.text_document.uri
-    pos = params.position
-    
-    # 修正点：使用 MessageType 枚举而不是整数
-    server.show_message_log("--- 接收到跳转请求 ---", MessageType.Log)
-    
-    file_path = _uri_to_path(uri)
-    line_1 = pos.line + 1
-    col_1 = pos.character + 1
+    logger.info(f"🚀 开始索引: {len(commands)} 个文件, 进程数: {max_workers}")
 
-    server.show_message_log(f"分析位置: {file_path} L{line_1}:C{col_1}", MessageType.Info)
-
-    if not server.db:
-        server.show_message_log("错误: 数据库连接未初始化", MessageType.Error)
-        return None
-
-    try:
-        # 修正点：不再在 handler 内部调用 set_library_path
-        args = server.file_args_map.get(file_path, [])
-        index = Index.create() # 这里的 index 是安全的，因为 main 中已初始化 path
-        tu = index.parse(file_path, args=args)
-        loc = tu.get_location(file_path, (line_1, col_1))
-        
-        # 修正点：已在顶部导入 Cursor
-        cursor = Cursor.from_location(tu, loc)
-        
-        if not cursor or cursor.is_null():
-            server.show_message_log("未能识别符号", MessageType.Warning)
-            return None
-
-        target = cursor.referenced if cursor.referenced else cursor
-        usr = target.get_usr()
-        
-        if not usr:
-            return None
-
-        result = server.db.find_definition(usr)
-        if result:
-            def_path, def_line, def_col = result
-            return Location(
-                uri=Path(def_path).as_uri(),
-                range=Range(
-                    start=Position(line=def_line - 1, character=def_col - 1),
-                    end=Position(line=def_line - 1, character=def_col)
-                )
-            )
-    except Exception as e:
-        server.show_message_log(f"跳转异常: {str(e)}", MessageType.Error)
-        
-    return None
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(index_worker, cmd, lib_path, db_path) for cmd in commands]
+        done = 0
+        for future in as_completed(futures):
+            # 获取子进程的返回值
+            result = future.result() 
+            
+            # 如果收到毒药，主进程立刻终止整个程序！
+            if result == "FATAL_ERROR":
+                logger.critical("🛑 主进程收到致命错误报告，立即退出！")
+                os._exit(1) # 绝对不要用 sys.exit(1)
+                
+            done += 1
+            if done % 20 == 0 or done == len(commands):
+                logger.info(f"进度: {done/len(commands)*100:.1f}")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--dir", required=True)
+    parser.add_argument("-d", "--directory")
+    parser.add_argument("-l", "--libpath")
     parser.add_argument("-s", "--server", action="store_true")
-    parser.add_argument("-l", "--lib", default="")
+    parser.add_argument("-j", "--jobs", type=int, default=0)
     args = parser.parse_args()
 
-    workspace_dir = os.path.abspath(args.dir)
-    lib_path = args.lib
-    
-    # ⭐ 核心修正：在所有逻辑开始前，全局只调用一次 set_library_path
-    if lib_path and os.path.exists(lib_path):
+    if args.libpath:
+        # # 1. 先只导入 Config，不要碰 Index 或 Cursor
+        # from cindex import Config
         try:
-            Config.set_library_path(lib_path)
-            logger.info(f"成功设置 Clang 路径: {lib_path}")
+            Config.set_library_path(args.libpath)
+            logger.info(f"设置 LLVM 22 库路径: {args.libpath}")
         except Exception as e:
-            logger.warning(f"设置 Clang 路径时发生警告 (可能已设置): {e}")
-
-    db_path = _db_path(workspace_dir)
+            logger.critical(f"main 无法加载 LLVM 库: {e}")
+            logger.critical("发现致命配置错误，直接退出")
+            sys.exit(1) # 发现致命配置错误，直接退出
 
     if args.server:
-        ls.db = IndexDatabase(db_path)
-        ls.lib_path = lib_path
-        commands = _load_compile_commands(workspace_dir)
-        ls.file_args_map = _build_file_args_map(commands) if commands else {}
+        db_path = os.path.join(args.directory, "pyclangd_index.db")
+        if os.path.exists(db_path):
+            ls.db = Database(db_path)
+            logger.info("LSP Server 加载数据库成功")
         ls.start_io()
     else:
-        sys.exit(run_index_mode(workspace_dir, lib_path))
-
-def _db_path(workspace_dir):
-    return os.path.join(workspace_dir, "pyclangd_index.db")
+        run_index_mode(args.directory, args.libpath, args.jobs)
 
 if __name__ == "__main__":
     main()
