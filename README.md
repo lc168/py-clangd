@@ -64,3 +64,21 @@ npm run watch
 
 ~/sda/work/py-clangd/venv/bin/python3  ~/sda/work/py-clangd/server/pyclangd_server.py -d ./ -l /home/lc/llvm22/lib -j 64  2>&1
 ```
+
+## 项目使用环境安装
+
+```
+git clone https://gitee.com/lc168/py-clangd.git
+
+复原 node_modules
+npm install
+
+# 1. 在本地重新创建一个全新的干净虚拟环境 (就叫 venv)
+python3 -m venv venv
+
+# 2. 激活这个虚拟环境
+source venv/bin/activate
+
+# 3. 根据配方表 (requirements.txt) 下载所有 Python 依赖
+pip install -r requirements.txt
+```
