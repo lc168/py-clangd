@@ -1,6 +1,22 @@
-# 忽略 Python 虚拟环境
-venv/
+# --- Node.js & 前端 ---
+node_modules/
 out/
-# 忽略 Python 编译缓存
-**/__pycache__/
+dist/
+.vscode-test/
+*.vsix
+
+# --- Python & 后端 ---
+venv/
+__pycache__/
 *.pyc
+*.pyo
+
+# --- 数据库 & 缓存 (极度重要) ---
+pyclangd_index.db
+pyclangd_index.db-wal
+pyclangd_index.db-shm
+compile_commands.json
+
+# --- OS 自动生成文件 ---
+.DS_Store
+Thumbs.db
