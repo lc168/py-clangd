@@ -55,3 +55,10 @@ PyClangd/
 ```
 
 使用插件前请在设置中配置 **pyclangd.libraryPath**（libclang 库目录，必填），例如 `/home/xxx/llvm22/lib`。
+
+## 一些常用指令
+```
+./venv/bin/python -m  pip freeze > requirements.txt
+./venv/bin/python -m pip install -r requirements.txt
+npm run watch
+```
