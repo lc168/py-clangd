@@ -258,7 +258,7 @@ def lsp_definition(server: PyClangdServer, params):
     file_path = os.path.normpath(uri.replace("file://", ""))
     line_idx = params.position.line
     col_idx = params.position.character
-
+    logger.info(f"跳转到定义:点击{file_path}:{line_idx},{col_idx}:")
     try:
         # 1. 直接读取本地文件提取单词
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -279,6 +279,7 @@ def lsp_definition(server: PyClangdServer, params):
 
         # 2. 拿着单词直接去数据库里“撞”
         # 这里的速度是索引级的，对于 Linux 内核这种量级也是瞬间完成
+        logger.info(f"跳转到定义:查找{word_match}")
         results = server.db.get_definitions_by_name(word_match)
         
         if not results:
