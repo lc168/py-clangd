@@ -116,5 +116,26 @@ class Database:
         ''', (name,))
         return self.cursor.fetchall()
 
+    def get_usr_at_location(self, file_path, line, col):
+        """核心：查询特定坐标下的符号 USR (精准跳转的基础)"""
+        # 匹配逻辑：s_line == line 且 s_col <= col <= e_col
+        # ⭐ 优化：优先匹配 role != 'def' (引用处)，并按宽度升序排列 (最精准的优先)
+        self.cursor.execute('''
+            SELECT usr FROM refs 
+            WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
+            ORDER BY (CASE WHEN role = 'def' THEN 1 ELSE 0 END), (e_col - s_col) ASC
+            LIMIT 1
+        ''', (file_path, line, col, col))
+        res = self.cursor.fetchone()
+        return res[0] if res else None
+
+    def get_definitions_by_usr(self, usr):
+        """通过 USR 精确查找定义位置"""
+        self.cursor.execute('''
+            SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
+            FROM refs WHERE usr = ? AND role = 'def'
+        ''', (usr,))
+        return self.cursor.fetchall()
+
     def close(self):
         self.conn.close()

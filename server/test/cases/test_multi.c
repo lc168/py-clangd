@@ -1,11 +1,8 @@
-// test_multi.c
 #include "test_multi.h"
 
-int global_var = 100;
+int global_var = 100; // @def: global_var_def
 
 int main() {
-    // @jump: global_func
-    global_func();
-    // @jump: global_var
-    return global_var;
+    global_func(); // @jump: global_func
+    return global_var; // @jump: global_var_def
 }

@@ -27,18 +27,7 @@ class MockParams:
 
 # --- Helper to find libclang ---
 def find_lib_path():
-    # 优先从环境变量读取
-    env_path = os.environ.get("PYCLANGD_LIB_PATH")
-    if env_path and os.path.exists(env_path):
-        return env_path
-    # 常见路径尝试
-    common_paths = [
-        "/home/lc/llvm22/lib",
-    ]
-    for p in common_paths:
-        if os.path.exists(p):
-            return p
-    return None
+    return "/home/lc/llvm22/lib"
 
 # --- Marker Discovery Logic ---
 def discover_tests(cases_dir):
@@ -59,13 +48,13 @@ def discover_tests(cases_dir):
         with open(f_abs, 'r', encoding='utf-8', errors='ignore') as f:
             for line_idx, line in enumerate(f):
                 # 匹配 @def: label
-                def_match = re.search(r'//\s*@def:\s*(\w+)', line)
+                def_match = re.search(r'//\s*@def:\s*([\w:]+)', line)
                 if def_match:
                     label = def_match.group(1)
                     defs[label] = (f_rel, line_idx)
                 
                 # 匹配 @jump: label
-                jump_match = re.search(r'//\s*@jump:\s*(\w+)', line)
+                jump_match = re.search(r'//\s*@jump:\s*([\w:]+)', line)
                 if jump_match:
                     label = jump_match.group(1)
                     jumps_raw.append({
@@ -87,26 +76,32 @@ def discover_tests(cases_dir):
             with open(f_abs, 'r') as f:
                 lines = f.readlines()
                 content = lines[j['line']]
-                # 查找标识符，考虑多种可能性（可能是 label 本身，也可能是 label_a 这种）
-                # 我们优先查找 label 本身。
-                # 比如：// @jump: id_a 对应代码 a.id = 1; 这里的标识符是 id
-                # 所以我们还是需要一种方式知道到底要跳哪个词。
-                # 约定：标记格式改为 // @jump: label (word_to_click)
-                # 暂且简单处理：如果在行内找到 label，就用它的位置。
-                # 如果没找到（比如结构体成员），我们就搜 // @jump: label 之前的第一个标识符
                 
-                # 特殊处理：如果 label 包含下划线且没搜到，尝试搜后缀（如 id_a -> id）
-                search_word = label
-                if label not in content and '_' in label:
-                    search_word = label.split('_')[0]
+                # 特殊逻辑：标记格式为 // @jump: label
+                # 我们寻找行中与 label 相关的单词。
+                # 比如：a.id = 1; // @jump: id_a  -> 我们想找 id
                 
-                m = re.search(r'\b' + re.escape(search_word) + r'\b', content)
+                # 在标记 // 之前的代码部分搜索
+                code_part = content.split('//')[0]
+
+                # 支持 @jump: label:word 格式，显式指定要点击的单词
+                # 如果没有冒号，则 search_word 就是 label
+                parts = label.split(':')
+                search_word = parts[-1] 
+                
+                # 寻找 search_word
+                m = re.search(r'\b' + re.escape(search_word) + r'\b', code_part)
                 if m:
                     col_idx = m.start()
                 else:
-                    # 兜底：找行中第一个单词
-                    m2 = re.search(r'[a-zA-Z_]', content)
-                    if m2: col_idx = m2.start()
+                    # 兜底：寻找 code_part 中的最后一个单词（通常是我们要跳转的那个）
+                    words = list(re.finditer(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', code_part))
+                    if words:
+                        col_idx = words[-1].start()
+                    else:
+                        # 最后的兜底：行首
+                        m2 = re.search(r'[a-zA-Z_]', content)
+                        if m2: col_idx = m2.start()
             
             test_tasks.append({
                 "file": j['file'],

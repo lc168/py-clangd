@@ -1,19 +1,13 @@
-// test_typedef.c
-// @def: MyInt
-typedef int MyInt;
+typedef int MyInt; // @def: MyInt:MyInt
 
 struct Point {
-    // @def: p_x
-    MyInt x;
-    // @def: p_y
-    MyInt y;
+    MyInt x; // @def: p_x:x
+    MyInt y; // @def: p_y:y
 };
 
 int main() {
-    // @jump: MyInt
-    MyInt a = 1;
+    MyInt a = 1; // @jump: MyInt:MyInt
     struct Point p;
-    // @jump: p_x
-    p.x = 2;
+    p.x = 2; // @jump: p_x:x
     return 0;
 }

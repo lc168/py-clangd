@@ -2,10 +2,8 @@
 #ifndef TEST_MULTI_H
 #define TEST_MULTI_H
 
-// @def: global_func
-void global_func() {}
+void global_func() {} // @def: global_func
 
-// @def: global_var
-extern int global_var;
+extern int global_var; // @def: global_var_decl
 
 #endif

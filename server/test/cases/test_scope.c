@@ -1,16 +1,11 @@
-// test_scope.c
-// @def: g_val
-int val = 10;
+int val = 10; // @def: g_val:val
 
 void func() {
-    // @def: l_val
-    int val = 20;
-    // @jump: l_val
-    val = 30;
+    int val = 20; // @def: l_val:val
+    val = 30; // @jump: l_val:val
 }
 
 int main() {
-    // @jump: g_val
-    val = 40;
+    val = 40; // @jump: g_val:val
     return 0;
 }

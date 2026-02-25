@@ -139,46 +139,69 @@ def index_worker(cmd_info, lib_path, db_path):
         for node in tu.cursor.walk_preorder():
             if not node.location.file: continue
             
-            # 【核心修改点】：去掉 samefile 限制，允许抓取头文件里的内联函数！
-            # 但我们只存入当前 source_file 能够“看到”的符号位置
             node_file = os.path.realpath(node.location.file.name)
             
-            # 角色 A: 定义 (def)
-            if node.is_definition() and node.kind in (
+            # --- 角色 A: 定义 (def) ---
+            # ⭐ 宏定义在 Clang 中可能不被认为是 is_definition()，所以我们显式放宽
+            is_def_kind = node.kind in (
                 CursorKind.FUNCTION_DECL, CursorKind.CXX_METHOD,
                 CursorKind.STRUCT_DECL, CursorKind.CLASS_DECL,
-                CursorKind.VAR_DECL, CursorKind.MACRO_DEFINITION
-            ):
+                CursorKind.VAR_DECL, CursorKind.FIELD_DECL,       # <--- 结构体成员
+                CursorKind.TYPEDEF_DECL,                          # <--- 类型定义
+                CursorKind.ENUM_DECL, CursorKind.ENUM_CONSTANT_DECL, # <--- 枚举
+                CursorKind.MACRO_DEFINITION
+            )
+            
+            if is_def_kind:
+                # 除了宏以外，必须是真正的定义/声明
+                if node.kind != CursorKind.MACRO_DEFINITION and not node.is_definition():
+                    is_def_kind = False
+            
+            if is_def_kind:
                 usr = node.get_usr()
-                if not usr: continue
-                # 存入字典
-                symbols_to_upsert.append((usr, node.spelling, node.kind.name))
-                # 存入位置 (role = 'def')
-                refs_to_insert.append((
-                    usr, None, node_file, 
-                    node.extent.start.line, node.extent.start.column,
-                    node.extent.end.line, node.extent.end.column, 'def'
-                ))
-
-            # 角色 B: 调用关系 (call)
-            elif node.kind == CursorKind.CALL_EXPR:
-                callee = node.referenced
-                if callee:
-                    usr = callee.get_usr()
-                    if not usr: continue
+                if usr:
+                    symbols_to_upsert.append((usr, node.spelling, node.kind.name))
+                    # ⭐ pinpoint: 仅记录标识符所在的坐标，而不是整个代码段 (如包含初始化等)
+                    s_line, s_col = node.location.line, node.location.column
+                    e_line, e_col = s_line, s_col + len(node.spelling or "")
                     
-                    # 向上找父亲，看看是谁在调用它 (Caller)
-                    parent = node.semantic_parent
-                    caller_usr = parent.get_usr() if (parent and parent.kind.is_declaration()) else None
-                    
-                    # 补充字典 (防止被调用的库函数不在字典里)
-                    symbols_to_upsert.append((usr, callee.spelling, callee.kind.name))
-                    # 存入位置 (role = 'call')
                     refs_to_insert.append((
-                        usr, caller_usr, node_file,
-                        node.extent.start.line, node.extent.start.column,
-                        node.extent.end.line, node.extent.end.column, 'call'
+                        usr, None, node_file, 
+                        s_line, s_col, e_line, e_col, 'def'
                     ))
+
+            # --- 角色 B: 引用与调用 (ref/call) ---
+            ref_kinds = (
+                CursorKind.CALL_EXPR,
+                CursorKind.MEMBER_REF_EXPR,  # a.id 中的 id
+                CursorKind.DECL_REF_EXPR,    # 变量名引用
+                CursorKind.TYPE_REF,         # 类型名引用
+                CursorKind.OVERLOADED_DECL_REF
+            )
+            
+            if node.kind in ref_kinds:
+                target = node.referenced
+                if target:
+                    usr = target.get_usr()
+                    if usr:
+                        # 向上找父亲 (Caller)
+                        parent = node.semantic_parent
+                        caller_usr = parent.get_usr() if (parent and parent.kind.is_declaration()) else None
+                        
+                        # 补全字典
+                        symbols_to_upsert.append((usr, target.spelling, target.kind.name))
+                        # 存入位置 (role = 'ref' 或 'call')
+                        role = 'call' if node.kind == CursorKind.CALL_EXPR else 'ref'
+                        
+                        # ⭐ pinpoint: 引用也应该使用 pinpoint 坐标，防止被外层表达式“吞掉”
+                        s_line, s_col = node.location.line, node.location.column
+                        # 注意：有些 node.spelling 可能为空，回退到 target.spelling
+                        e_line, e_col = s_line, s_col + len(node.spelling or target.spelling or "")
+                        
+                        refs_to_insert.append((
+                            usr, caller_usr, node_file,
+                            s_line, s_col, e_line, e_col, role
+                        ))
 
         # 2. 事务提交：批量写入并标记完成
         db.batch_insert_v2(symbols_to_upsert, refs_to_insert)
@@ -270,57 +293,65 @@ import re
 # 在 PyClangdServer 类中修改或添加定义跳转函数
 @ls.feature(TEXT_DOCUMENT_DEFINITION)
 def lsp_definition(server: PyClangdServer, params):
-    """跳转到定义：纯数据库查表，0 毫秒解析延迟"""
+    """跳转到定义：先尝试坐标精准匹配，再回退到单词模糊匹配"""
     uri = params.text_document.uri
     file_path = os.path.normpath(uri.replace("file://", ""))
-    line_idx = params.position.line
-    col_idx = params.position.character
-    logger.info(f"👉 发起跳转lsp_definition:{os.path.basename(file_path)} 行{line_idx+1} 列{col_idx}")
+    # LSP Position 是 0-indexed
+    line_0 = params.position.line
+    col_0 = params.position.character
+    
+    # 转换为 Clang/DB 使用的 1-indexed
+    line_1 = line_0 + 1
+    col_1 = col_0 + 1
+    
+    logger.info(f"👉 发起跳转: {os.path.basename(file_path)} 行{line_1} 列{col_1}")
+    
     try:
-        # 1. 直接读取本地文件提取单词
+        # --- 策略 1：坐标精准匹配 (USR 级别) ---
+        usr = server.db.get_usr_at_location(file_path, line_1, col_1)
+        if usr:
+            logger.info(f"   ↳ 🎯 坐标命中了 USR: {usr} (line={line_1}, col={col_1})")
+            results = server.db.get_definitions_by_usr(usr)
+            if results:
+                logger.info(f"   ↳ ✅ USR 查找成功: 找到 {len(results)} 个定义")
+                return [Location(
+                    uri=f"file://{fp}",
+                    range=Range(
+                        start=Position(line=sl-1, character=sc-1),
+                        end=Position(line=el-1, character=ec-1)
+                    )
+                ) for fp, sl, sc, el, ec in results]
+
+        # --- 策略 2：单词模糊匹配 (回退方案) ---
+        # 如果坐标没命（比如索引还没更新，或者是一个没抓取到的引用类型）
+        word_match = None
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
-            if line_idx >= len(lines): return None
-            current_line = lines[line_idx]
-            
-            # 使用正则从光标位置向前后扩展，提取完整的标识符
-            # 匹配字母、数字、下划线
-            word_match = None
-            for m in re.finditer(r'[a-zA-Z_][a-zA-Z0-9_]*', current_line):
-                if m.start() <= col_idx <= m.end():
-                    word_match = m.group()
-                    break
-            
-            if not word_match:
-                logger.info("   ↳ ❌ 提取失败: 光标位置没有合法的 C 语言标识符")
-                return None
-
-        # 2. 拿着单词直接去数据库里“撞”
-        # 这里的速度是索引级的，对于 Linux 内核这种量级也是瞬间完成
-        logger.info(f"   ↳ 🔍 正在查库: '{word_match}' ...")
-        results = server.db.get_definitions_by_name(word_match)
+            if line_0 < len(lines):
+                current_line = lines[line_0]
+                for m in re.finditer(r'[a-zA-Z_][a-zA-Z0-9_]*', current_line):
+                    if m.start() <= col_0 <= m.end():
+                        word_match = m.group()
+                        break
         
-        if not results:
-            logger.info(f"   ↳ ❌ 查找失败: 数据库中没有 '{word_match}' 的定义")
-            return None
+        if word_match:
+            logger.info(f"   ↳ 🔍 坐标未命中，回退到单词搜索: '{word_match}' ...")
+            results = server.db.get_definitions_by_name(word_match)
+            if results:
+                logger.info(f"   ↳ ✅ 单词查找成功: 找到 {len(results)} 个定义")
+                return [Location(
+                    uri=f"file://{fp}",
+                    range=Range(
+                        start=Position(line=sl-1, character=sc-1),
+                        end=Position(line=el-1, character=ec-1)
+                    )
+                ) for fp, sl, sc, el, ec in results]
 
-        logger.info(f"   ↳ ✅ 查找成功: 找到 {len(results)} 个定义 (例如: {os.path.basename(results[0][0])}:{results[0][1]})")
-        # 3. 构造返回位置
-        locations = []
-        for fp, sl, sc, el, ec in results:
-            locations.append(Location(
-                uri=f"file://{fp}",
-                range=Range(
-                    start=Position(line=sl-1, character=sc-1),
-                    end=Position(line=el-1, character=ec-1)
-                )
-            ))
-        
-        # 如果有多个重名定义（比如不同结构体里的同名成员），VS Code 会弹出一个列表供用户选择
-        return locations
+        logger.info("   ↳ ❌ 跳转失败: 坐标和单词均未找到定义")
+        return None
 
     except Exception as e:
-        logger.error(f"lsp_definition:跳转定义失败: {e}")
+        logger.error(f"lsp_definition 崩溃: {e}")
         return None
 
 
