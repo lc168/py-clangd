@@ -98,10 +98,19 @@ class Database:
         ''', (file_path,))
         return self.cursor.fetchall()
     
+    # def get_definitions_by_name(self, name):
+    #     """跳转定义 (F12)：查名字对应的所有定义位置"""
+    #     self.cursor.execute('''
+    #         SELECT r.file_path, r.s_line, r.s_col, r.e_line, r.e_col 
+    #         FROM refs r JOIN symbols s ON r.usr = s.usr
+    #         WHERE s.name = ? AND r.role = 'def'
+    #     ''', (name,))
+    #     return self.cursor.fetchall()
     def get_definitions_by_name(self, name):
         """跳转定义 (F12)：查名字对应的所有定义位置"""
         self.cursor.execute('''
-            SELECT r.file_path, r.s_line, r.s_col, r.e_line, r.e_col 
+            -- ⭐ 【修改核心】：加上 DISTINCT，强制合并物理坐标完全相同的重复结果
+            SELECT DISTINCT r.file_path, r.s_line, r.s_col, r.e_line, r.e_col 
             FROM refs r JOIN symbols s ON r.usr = s.usr
             WHERE s.name = ? AND r.role = 'def'
         ''', (name,))

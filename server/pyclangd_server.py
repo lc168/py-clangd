@@ -4,6 +4,7 @@ import logging
 import multiprocessing
 import json
 import argparse
+import shlex
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 try:
@@ -21,8 +22,16 @@ from database import Database
 from cindex import Index, Cursor, CursorKind, Config
 
 # 日志定向到 stderr，VS Code 才能在输出窗口显示
-logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(levelname)s: %(message)s')
+# 只有出现 WARNING、ERROR 或 CRITICAL 时才会打印
+logging.basicConfig(level=logging.WARNING,
+                    stream=sys.stderr,
+                    format='%(levelname)s [%(name)s]: %(message)s'
+                    )
+
+#创建PyClangd标记的打印
 logger = logging.getLogger("PyClangd")
+# # 单独把我们自己的 PyClangd 设置为 INFO 级别，这样只有我们的进度条会显示
+logger.setLevel(logging.INFO)
 
 # --- 独立 Worker 函数 (必须定义在顶层以支持序列化) ---
 def index_worker(cmd_info, lib_path, db_path):
@@ -47,7 +56,15 @@ def index_worker(cmd_info, lib_path, db_path):
     idx = Index.create()
 
     # --- 2. 终极参数清洗：精准剔除毒药参数 ---
+    # ⭐ 【修复核心】：兼容 command 字符串格式和 arguments 列表格式
     raw_args = cmd_info.get('arguments', [])
+    if not raw_args:
+        command_str = cmd_info.get('command', '')
+        raw_args = shlex.split(command_str) # 将完整的命令行字符串切分成列表
+        
+    if not raw_args:
+        logger.warning(f"无法获取编译参数: {source_file}")
+        return False
     # 提取源文件的纯文件名，比如 "bin2c.c"
     source_basename = os.path.basename(source_file)
 
@@ -258,7 +275,7 @@ def lsp_definition(server: PyClangdServer, params):
     file_path = os.path.normpath(uri.replace("file://", ""))
     line_idx = params.position.line
     col_idx = params.position.character
-    logger.info(f"跳转到定义:点击{file_path}:{line_idx},{col_idx}:")
+    logger.info(f"👉 发起跳转lsp_definition:{os.path.basename(file_path)} 行{line_idx+1} 列{col_idx}")
     try:
         # 1. 直接读取本地文件提取单词
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -275,16 +292,19 @@ def lsp_definition(server: PyClangdServer, params):
                     break
             
             if not word_match:
+                logger.info("   ↳ ❌ 提取失败: 光标位置没有合法的 C 语言标识符")
                 return None
 
         # 2. 拿着单词直接去数据库里“撞”
         # 这里的速度是索引级的，对于 Linux 内核这种量级也是瞬间完成
-        logger.info(f"跳转到定义:查找{word_match}")
+        logger.info(f"   ↳ 🔍 正在查库: '{word_match}' ...")
         results = server.db.get_definitions_by_name(word_match)
         
         if not results:
+            logger.info(f"   ↳ ❌ 查找失败: 数据库中没有 '{word_match}' 的定义")
             return None
 
+        logger.info(f"   ↳ ✅ 查找成功: 找到 {len(results)} 个定义 (例如: {os.path.basename(results[0][0])}:{results[0][1]})")
         # 3. 构造返回位置
         locations = []
         for fp, sl, sc, el, ec in results:
@@ -300,7 +320,7 @@ def lsp_definition(server: PyClangdServer, params):
         return locations
 
     except Exception as e:
-        logger.error(f"跳转定义失败: {e}")
+        logger.error(f"lsp_definition:跳转定义失败: {e}")
         return None
 
 
