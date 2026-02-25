@@ -130,7 +130,7 @@ def index_worker(cmd_info, lib_path, db_path):
         for diag in tu.diagnostics:
             if diag.severity >= 3:
                 logger.warning(f"编译报错 [{source_file}]:args={compiler_args}")
-                logger.warning(f"语法报错(已忽略) [{source_file}]: {diag.spelling}")
+                logger.warning(f"语法报错(已忽略文件) [{source_file}]: {diag.spelling}")
 
 
         symbols_to_upsert = []
