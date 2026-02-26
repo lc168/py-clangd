@@ -138,7 +138,10 @@ def index_worker(cmd_info, lib_path):
         mtime = os.path.getmtime(source_file)
         #logger.info(f"正在编译 [{source_file}]:args={compiler_args}")
         tu = idx.parse(source_file, args=compiler_args, options=0x01)
-        
+
+        # # ⭐ 临时加的，用于调试test
+        # return "test", source_file, mtime, [], []
+
         for diag in tu.diagnostics:
             if diag.severity >= 3:
                 logger.warning(f"编译报错 [{source_file}]:args={compiler_args}")
@@ -392,7 +395,7 @@ def lsp_references(server: PyClangdServer, params):
         return []
 
 
-# --- 逻辑控制 ---
+# --- 索引产生数据库---
 def run_index_mode(workspace_dir, lib_path, jobs):
     """主动索引模式（带增量更新与断点续传）"""
     workspace_dir = os.path.abspath(workspace_dir)
