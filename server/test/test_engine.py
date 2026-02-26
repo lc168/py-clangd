@@ -119,14 +119,14 @@ def direct_build_db(cases_dir, db_path, lib_path, files):
     if os.path.exists(db_path):
         os.remove(db_path)
         
-    db = Database(db_path, is_main=True)
-    db.close()
-
+    lib_path = find_lib_path()
     from cindex import Config
     try:
         Config.set_library_path(lib_path)
     except Exception: pass
 
+    db = Database(db_path, is_main=True)
+    
     for f_rel in files:
         filepath = os.path.join(cases_dir, f_rel)
         mock_cmd_info = {
@@ -137,7 +137,12 @@ def direct_build_db(cases_dir, db_path, lib_path, files):
         if f_rel.endswith('.cpp'):
             mock_cmd_info["arguments"] = ["clang++", "-xc++", "-std=c++17", "-I" + cases_dir, filepath]
             
-        index_worker(mock_cmd_info, lib_path, db_path)
+        res = index_worker(mock_cmd_info, lib_path)
+        if res and res[0] == "SUCCESS":
+            _, source_file, mtime, symbols, refs = res
+            db.save_index_result(source_file, mtime, symbols, refs)
+    
+    db.close()
 
 def run_tests():
     cases_dir = os.path.join(current_dir, "cases")

@@ -1,5 +1,26 @@
 import sqlite3
 import os
+import time
+import random
+import functools
+
+def with_retry(max_retries=10, base_delay=0.05):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for i in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e).lower() and i < max_retries - 1:
+                        # 指数退避 + 随机抖动
+                        delay = base_delay * (2 ** i) + random.uniform(0, 0.1)
+                        time.sleep(delay)
+                        continue
+                    raise
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 class Database:
     # 增加 is_main 参数，默认 False（工人模式）
@@ -9,13 +30,23 @@ class Database:
         # 这会强制 Python 的 sqlite3 驱动在获取写锁时更聪明，彻底杜绝死锁假象！
         self.conn = sqlite3.connect(db_path, timeout=60.0, check_same_thread=False, isolation_level="IMMEDIATE")
         self.cursor = self.conn.cursor()
+        
+        # 核心优化 2：无论主次进程，都应使用 NORMAL 同步模式
+        self.conn.execute('PRAGMA journal_mode=WAL;')
+        self.conn.execute('PRAGMA synchronous=NORMAL;')
+        self.conn.execute(f'PRAGMA busy_timeout=60000;')
 
         # 核心逻辑：只有主进程（包工头）才允许去建表！
         if is_main:
-            # 只有主进程负责开启 WAL，一旦开启，永久生效，子进程无需再设
             self.conn.execute('PRAGMA journal_mode=WAL;')
             self.conn.execute('PRAGMA synchronous=NORMAL;')
             self._setup()
+
+    def enable_speed_mode(self):
+        """开启极速索引模式：彻底牺牲断电安全性换取极致写入速度"""
+        self.conn.execute('PRAGMA synchronous=OFF;')
+        self.conn.execute('PRAGMA journal_mode=MEMORY;')
+        self.conn.execute('PRAGMA cache_size=100000;') # 指数级增加缓存
 
     def _setup(self):
         # 表 A：全局符号字典 (极致瘦身，只存 USR、名字、类型)
@@ -56,16 +87,19 @@ class Database:
         self.conn.commit()
 
     # --- 增量更新的三大核心原子操作 ---
-    def update_file_status(self, file_path, mtime, status):
+    def update_file_status(self, file_path, mtime, status, commit=True):
         """更新文件状态：indexing, completed, failed"""
         self.cursor.execute('INSERT OR REPLACE INTO files VALUES (?, ?, ?)', (file_path, mtime, status))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
+    @with_retry()
     def prepare_file_reindex(self, file_path):
         """增量第一步：抹除该文件旧的物理位置记录"""
         self.cursor.execute('DELETE FROM refs WHERE file_path = ?', (file_path,))
         self.conn.commit()
 
+    @with_retry()
     def batch_insert_v2(self, symbols, refs):
         """毫秒级批量写入：先更新字典，再插入引用拓扑"""
         if symbols:
@@ -78,6 +112,24 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', refs)
         self.conn.commit()
+
+    def save_index_result(self, file_path, mtime, symbols, refs, commit=True):
+        """【性能核心】：单次事务完成状态更新、清理与写入"""
+        # 1. 更新状态与清理
+        self.cursor.execute('INSERT OR REPLACE INTO files VALUES (?, ?, ?)', (file_path, mtime, 'completed'))
+        self.cursor.execute('DELETE FROM refs WHERE file_path = ?', (file_path,))
+        
+        # 2. 写入数据
+        if symbols:
+            self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?)', symbols)
+        if refs:
+            self.cursor.executemany('''
+                INSERT INTO refs (usr, caller_usr, file_path, s_line, s_col, e_line, e_col, role) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', refs)
+            
+        if commit:
+            self.conn.commit()
 
     # --- LSP 查询接口 (全部升级为 JOIN 联表查询) ---
     def search_symbols(self, query):

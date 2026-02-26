@@ -22,8 +22,7 @@ from database import Database
 from cindex import Index, Cursor, CursorKind, Config
 
 # 日志定向到 stderr，VS Code 才能在输出窗口显示
-# 只有出现 WARNING、ERROR 或 CRITICAL 时才会打印
-logging.basicConfig(level=logging.WARNING,
+logging.basicConfig(level=logging.INFO,
                     stream=sys.stderr,
                     format='%(levelname)s [%(name)s]: %(message)s'
                     )
@@ -34,38 +33,38 @@ logger = logging.getLogger("PyClangd")
 logger.setLevel(logging.INFO)
 
 # --- 独立 Worker 函数 (必须定义在顶层以支持序列化) ---
-def index_worker(cmd_info, lib_path, db_path):
-    """
-    单文件索引任务：由子进程调用
-    """
+def index_worker(cmd_info, lib_path):
     # --- 1. 路径预处理：使用 realpath 消除软链接影响 ---
     directory = cmd_info.get('directory', '')
     file_rel = cmd_info.get('file', '')
-    source_file = os.path.realpath(os.path.join(directory, file_rel)) #
+    source_file = os.path.realpath(os.path.join(directory, file_rel)) 
+    
+    # ⭐ 核心修复：必须切换到该文件所属的编译目录，否则 realpath(header) 会基于 py-clangd 目录解析！
+    if directory:
+        os.chdir(directory)
     
     # 暂时跳过汇编文件
     if source_file.endswith(('.S', '.s')):
-        logger.info(f"跳过汇编文件: {source_file}")
-        return True
+        return "SKIP", source_file, 0, [], []
 
     if not os.path.exists(source_file):
-        # 遇到错误，向父进程返回“毒药”字符串
-        logger.critical(f"File not found: {source_file}")
+        logger.warning(f"跳过不存在的文件: {source_file}")
+        return "FAILED", source_file, 0, [], []
 
-    db = Database(db_path)
+    if not Config.library_path:
+        Config.set_library_path(lib_path)
     idx = Index.create()
-
-    # --- 2. 终极参数清洗：精准剔除毒药参数 ---
-    # ⭐ 【修复核心】：兼容 command 字符串格式和 arguments 列表格式
-    raw_args = cmd_info.get('arguments', [])
+    
+    # 获取原始参数并进行清洗
+    raw_args = cmd_info.get('arguments')
     if not raw_args:
+        # ⭐ 核心兼容：有些 compile_commands.json 使用 "command" 字符串而不是 "arguments" 列表
         command_str = cmd_info.get('command', '')
-        raw_args = shlex.split(command_str) # 将完整的命令行字符串切分成列表
-        
-    if not raw_args:
-        logger.warning(f"无法获取编译参数: {source_file}")
-        return False
-    # 提取源文件的纯文件名，比如 "bin2c.c"
+        if command_str:
+            raw_args = shlex.split(command_str)
+        else:
+            raw_args = []
+            
     source_basename = os.path.basename(source_file)
 
     compiler_args = []
@@ -90,7 +89,17 @@ def index_worker(cmd_info, lib_path, db_path):
             continue
             
         # 4. 干掉 Clang 不认识的 GCC 专属参数
-        if arg in ('-fconserve-stack', '-fno-var-tracking-assignments') or arg.startswith('-mabi='):
+        if arg in ('-fconserve-stack', '-fno-var-tracking-assignments', '-fmerge-all-constants') or arg.startswith(('-mabi=', '-falign-kernels')):
+            continue
+
+        # 5. 干掉可能会导致 libclang 报错的参数：仅针对依赖生成与强制报错
+        # 注意：不要 arg.startswith('-Wp,-MMD')，这太宽泛了，可能干掉 -Wp,-D_FORTIFY_SOURCE
+        if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')):
+            continue
+        if arg == '-MF':
+            skip_next = True
+            continue
+        if arg.startswith('-Werror='):
             continue
         
         compiler_args.append(arg)
@@ -105,6 +114,11 @@ def index_worker(cmd_info, lib_path, db_path):
     compiler_args.append('-Wno-implicit-int')        # 忽略老代码没写返回值类型的报错
     compiler_args.append('-Wno-unknown-warning-option') # <--- 【新增】：让 Clang 忽略它不认识的 GCC 参数
 
+    # === 【修复核心】：对付内核代码，必须注入 Working Directory ===
+    if directory:
+        compiler_args.append('-working-directory')
+        compiler_args.append(directory)
+
     # ⭐ 新增：动态识别交叉编译架构 (从 raw_args[0] 也就是编译器名称中提取)
     compiler_path = raw_args[0] if raw_args else ''
     if 'aarch64' in compiler_path or 'arm64' in compiler_path:
@@ -118,12 +132,9 @@ def index_worker(cmd_info, lib_path, db_path):
     compiler_args.append('-isystem')
     compiler_args.append(builtin_includes)
 
+    mtime = 0
     try:
-        # 1. 事务开始：标记正在索引并清理旧数据
         mtime = os.path.getmtime(source_file)
-        db.update_file_status(source_file, mtime, 'indexing')
-        db.prepare_file_reindex(source_file)
-        
         #logger.info(f"正在编译 [{source_file}]:args={compiler_args}")
         tu = idx.parse(source_file, args=compiler_args, options=0x01)
         
@@ -135,85 +146,95 @@ def index_worker(cmd_info, lib_path, db_path):
 
         symbols_to_upsert = []
         refs_to_insert = []
+        
+        # 优化：路径缓存，大幅减少 os.path.realpath 调用
+        path_cache = {}
+        last_file_obj = None
+        last_node_file = None
+
+        # 提前定义好 kind 常量，加速循环
+        REF_KINDS = {
+            CursorKind.CALL_EXPR,
+            CursorKind.MEMBER_REF_EXPR,
+            CursorKind.DECL_REF_EXPR,
+            CursorKind.TYPE_REF,
+            CursorKind.OVERLOADED_DECL_REF
+        }
+        
+        DEF_KINDS = {
+            CursorKind.FUNCTION_DECL, CursorKind.CXX_METHOD,
+            CursorKind.STRUCT_DECL, CursorKind.CLASS_DECL,
+            CursorKind.VAR_DECL, CursorKind.FIELD_DECL,
+            CursorKind.TYPEDEF_DECL,
+            CursorKind.ENUM_DECL, CursorKind.ENUM_CONSTANT_DECL,
+            CursorKind.MACRO_DEFINITION
+        }
 
         for node in tu.cursor.walk_preorder():
-            if not node.location.file: continue
+            loc = node.location
+            file_obj = loc.file
+            if not file_obj: continue
             
-            node_file = os.path.realpath(node.location.file.name)
+            # --- 优化点 1：缓存文件路径解析 ---
+            if file_obj == last_file_obj:
+                node_file = last_node_file
+            else:
+                raw_name = file_obj.name
+                if raw_name in path_cache:
+                    node_file = path_cache[raw_name]
+                else:
+                    node_file = os.path.realpath(raw_name)
+                    path_cache[raw_name] = node_file
+                last_file_obj = file_obj
+                last_node_file = node_file
+            
+            # --- 优化点 2：减少 node.kind 获取次数 ---
+            kind = node.kind
             
             # --- 角色 A: 定义 (def) ---
-            # ⭐ 宏定义在 Clang 中可能不被认为是 is_definition()，所以我们显式放宽
-            is_def_kind = node.kind in (
-                CursorKind.FUNCTION_DECL, CursorKind.CXX_METHOD,
-                CursorKind.STRUCT_DECL, CursorKind.CLASS_DECL,
-                CursorKind.VAR_DECL, CursorKind.FIELD_DECL,       # <--- 结构体成员
-                CursorKind.TYPEDEF_DECL,                          # <--- 类型定义
-                CursorKind.ENUM_DECL, CursorKind.ENUM_CONSTANT_DECL, # <--- 枚举
-                CursorKind.MACRO_DEFINITION
-            )
-            
-            if is_def_kind:
-                # 除了宏以外，必须是真正的定义/声明
-                if node.kind != CursorKind.MACRO_DEFINITION and not node.is_definition():
-                    is_def_kind = False
-            
-            if is_def_kind:
-                usr = node.get_usr()
-                if usr:
-                    symbols_to_upsert.append((usr, node.spelling, node.kind.name))
-                    # ⭐ pinpoint: 仅记录标识符所在的坐标，而不是整个代码段 (如包含初始化等)
-                    s_line, s_col = node.location.line, node.location.column
-                    e_line, e_col = s_line, s_col + len(node.spelling or "")
-                    
-                    refs_to_insert.append((
-                        usr, None, node_file, 
-                        s_line, s_col, e_line, e_col, 'def'
-                    ))
+            if kind in DEF_KINDS:
+                if kind == CursorKind.MACRO_DEFINITION or node.is_definition():
+                    usr = node.get_usr()
+                    if usr:
+                        name = node.spelling or ""
+                        symbols_to_upsert.append((usr, name, kind.name))
+                        s_line, s_col = loc.line, loc.column
+                        refs_to_insert.append((
+                            usr, None, node_file, 
+                            s_line, s_col, s_line, s_col + len(name), 'def'
+                        ))
 
             # --- 角色 B: 引用与调用 (ref/call) ---
-            ref_kinds = (
-                CursorKind.CALL_EXPR,
-                CursorKind.MEMBER_REF_EXPR,  # a.id 中的 id
-                CursorKind.DECL_REF_EXPR,    # 变量名引用
-                CursorKind.TYPE_REF,         # 类型名引用
-                CursorKind.OVERLOADED_DECL_REF
-            )
-            
-            if node.kind in ref_kinds:
+            if kind in REF_KINDS:
                 target = node.referenced
                 if target:
                     usr = target.get_usr()
                     if usr:
-                        # 向上找父亲 (Caller)
                         parent = node.semantic_parent
                         caller_usr = parent.get_usr() if (parent and parent.kind.is_declaration()) else None
                         
-                        # 补全字典
-                        symbols_to_upsert.append((usr, target.spelling, target.kind.name))
-                        # 存入位置 (role = 'ref' 或 'call')
-                        role = 'call' if node.kind == CursorKind.CALL_EXPR else 'ref'
+                        target_name = target.spelling or ""
+                        symbols_to_upsert.append((usr, target_name, target.kind.name))
                         
-                        # ⭐ pinpoint: 引用也应该使用 pinpoint 坐标，防止被外层表达式“吞掉”
-                        s_line, s_col = node.location.line, node.location.column
-                        # 注意：有些 node.spelling 可能为空，回退到 target.spelling
-                        e_line, e_col = s_line, s_col + len(node.spelling or target.spelling or "")
-                        
+                        role = 'call' if kind == CursorKind.CALL_EXPR else 'ref'
+                        s_line, s_col = loc.line, loc.column
+                        # 使用 pinpoint 坐标
+                        name = node.spelling or target_name or ""
                         refs_to_insert.append((
                             usr, caller_usr, node_file,
-                            s_line, s_col, e_line, e_col, role
+                            s_line, s_col, s_line, s_col + len(name), role
                         ))
 
-        # 2. 事务提交：批量写入并标记完成
-        db.batch_insert_v2(symbols_to_upsert, refs_to_insert)
-        db.update_file_status(source_file, mtime, 'completed')
-        return True
+        # 调试：记录成功返回
+        with open("/tmp/pyclangd_worker.log", "a") as f:
+            f.write(f"SUCCESS: {source_file}, symbols={len(symbols_to_upsert)}, refs={len(refs_to_insert)}\n")
+            
+        return "SUCCESS", source_file, mtime, symbols_to_upsert, refs_to_insert
     except Exception as e:
-        # === 【修改】：遇到 Python 级别崩溃，只牺牲当前文件，保全大局 ===
+        with open("/tmp/pyclangd_worker.log", "a") as f:
+            f.write(f"FAILED: {source_file}, error={repr(e)}\n")
         logger.error(f"❌ 索引单文件崩溃 [{source_file}]: {repr(e)}")
-        db.update_file_status(source_file, mtime, 'failed')
-        return False  # 返回 False 即可，不要返回 "FATAL_ERROR" 导致主进程自杀
-    finally:
-        db.close()
+        return "FAILED", source_file, mtime, [], []
 
 # --- LSP 服务端类 ---
 import threading
@@ -358,8 +379,10 @@ def lsp_definition(server: PyClangdServer, params):
 # --- 逻辑控制 ---
 def run_index_mode(workspace_dir, lib_path, jobs):
     """主动索引模式（带增量更新与断点续传）"""
+    workspace_dir = os.path.abspath(workspace_dir)
     db_path = os.path.join(workspace_dir, "pyclangd_index.db")
     cc_path = os.path.join(workspace_dir, "compile_commands.json")
+    lib_path = os.path.abspath(lib_path)
     
     if not os.path.exists(cc_path):
         logger.error("未找到 compile_commands.json")
@@ -395,25 +418,41 @@ def run_index_mode(workspace_dir, lib_path, jobs):
 
     logger.info(f"🚀 开始索引: 共 {len(commands)} 个文件，增量需要处理 {len(commands_to_run)} 个, 进程数: {max_workers}")
 
+    # --- 【优化核心】：主进程持有唯一写锁，Worker 只管解析 ---
+    db = Database(db_path, is_main=True)
+    db.enable_speed_mode()
+    
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # 注意这里传的是 commands_to_run
-        futures = [executor.submit(index_worker, cmd, lib_path, db_path) for cmd in commands_to_run]
+        # 注意：Worker 不再接收 db_path
+        futures = [executor.submit(index_worker, cmd, lib_path) for cmd in commands_to_run]
         done = 0
+        batch_count = 0
+        
         for future in as_completed(futures):
-            result = future.result() 
-            if result == "FATAL_ERROR":
-                logger.critical("🛑 主进程收到致命错误报告，立即退出！")
-
-                logger.critical("🛑 主进程收到致命错误报告，正在清理子进程并退出...")
-                # 1. 遍历当前存活的所有子进程，发送强制终止信号
-                for p in multiprocessing.active_children():
-                    p.terminate()
-                # 2. 退出主进程
-                os._exit(1)
+            try:
+                worker_res = future.result()
+                if not worker_res: continue
                 
-            done += 1
-            if done % 5 == 0 or done == len(commands_to_run):
-                logger.info(f"进度: [{done}/{len(commands_to_run)}] {done/len(commands_to_run)*100:.1f}%")
+                status, source_file, mtime, symbols, refs = worker_res
+                
+                if status == "SUCCESS":
+                    batch_count += 1
+                    # 每 50 个文件提交一次，平衡性能与事务开销
+                    db.save_index_result(source_file, mtime, symbols, refs, commit=(batch_count >= 50))
+                    if batch_count >= 50: batch_count = 0
+                elif status == "FAILED":
+                    db.update_file_status(source_file, mtime, 'failed')
+                
+                done += 1
+                if done % 20 == 0 or done == len(commands_to_run):
+                    logger.info(f"进度: [{done}/{len(commands_to_run)}] {done/len(commands_to_run)*100:.1f}%")
+            except Exception as e:
+                logger.error(f"❌ 主进程处理子任务异常: {repr(e)}")
+                done += 1
+
+        # 最后兜底提交
+        db.conn.commit()
+    db.close()
 
 def main():
     parser = argparse.ArgumentParser()
