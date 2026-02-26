@@ -189,5 +189,22 @@ class Database:
         ''', (usr,))
         return self.cursor.fetchall()
 
+    def get_references_by_usr(self, usr):
+        """查 USR 对应的所有引用位置（包含声明/定义、调用、读取等）"""
+        self.cursor.execute('''
+            SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
+            FROM refs WHERE usr = ? AND role IN ('ref', 'call', 'def')
+        ''', (usr,))
+        return self.cursor.fetchall()
+
+    def get_references_by_name(self, name):
+        """查名字对应的所有引用位置 (作为兜底)"""
+        self.cursor.execute('''
+            SELECT DISTINCT r.file_path, r.s_line, r.s_col, r.e_line, r.e_col 
+            FROM refs r JOIN symbols s ON r.usr = s.usr
+            WHERE s.name = ? AND r.role IN ('ref', 'call', 'def')
+        ''', (name,))
+        return self.cursor.fetchall()
+
     def close(self):
         self.conn.close()

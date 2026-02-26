@@ -11,6 +11,7 @@ try:
     from pygls.server import LanguageServer
     from lsprotocol.types import (
         TEXT_DOCUMENT_DEFINITION, TEXT_DOCUMENT_DOCUMENT_SYMBOL, WORKSPACE_SYMBOL,
+        TEXT_DOCUMENT_REFERENCES,
         Location, Range, Position, SymbolInformation, SymbolKind, DocumentSymbol, MessageType
     )
     from lsprotocol.types import TEXT_DOCUMENT_DID_SAVE
@@ -374,6 +375,68 @@ def lsp_definition(server: PyClangdServer, params):
     except Exception as e:
         logger.error(f"lsp_definition 崩溃: {e}")
         return None
+
+
+@ls.feature(TEXT_DOCUMENT_REFERENCES)
+def lsp_references(server: PyClangdServer, params):
+    """查找引用：先精准查找 USR 的所有引用，失败则回退到同名匹配"""
+    uri = params.text_document.uri
+    file_path = os.path.normpath(uri.replace("file://", ""))
+    line_0 = params.position.line
+    col_0 = params.position.character
+    
+    line_1 = line_0 + 1
+    col_1 = col_0 + 1
+    
+    logger.info(f"👉 查找引用: {os.path.basename(file_path)} 行{line_1} 列{col_1}")
+    
+    try:
+        # --- 策略 1：坐标精准匹配 (USR 级别) ---
+        usr = server.db.get_usr_at_location(file_path, line_1, col_1)
+        if usr:
+            logger.info(f"   ↳ 🎯 坐标命中了 USR: {usr} (line={line_1}, col={col_1})")
+            results = server.db.get_references_by_usr(usr)
+            if results:
+                logger.info(f"   ↳ ✅ USR 引用查找成功: 找到 {len(results)} 处引用")
+                return [Location(
+                    uri=f"file://{fp}",
+                    range=Range(
+                        start=Position(line=sl-1, character=sc-1),
+                        end=Position(line=el-1, character=ec-1)
+                    )
+                ) for fp, sl, sc, el, ec in results]
+
+        # --- 策略 2：单词模糊匹配 (回退方案) ---
+        word_match = None
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+            if line_0 < len(lines):
+                current_line = lines[line_0]
+                for m in re.finditer(r'[a-zA-Z_][a-zA-Z0-9_]*', current_line):
+                    if m.start() <= col_0 <= m.end():
+                        word_match = m.group()
+                        break
+        
+        if word_match:
+            logger.info(f"   ↳ 🔍 坐标未命中，回退到单词搜索引用: '{word_match}' ...")
+            results = server.db.get_references_by_name(word_match)
+            if results:
+                logger.info(f"   ↳ ✅ 单词引用查找成功: 找到 {len(results)} 处引用")
+                return [Location(
+                    uri=f"file://{fp}",
+                    range=Range(
+                        start=Position(line=sl-1, character=sc-1),
+                        end=Position(line=el-1, character=ec-1)
+                    )
+                ) for fp, sl, sc, el, ec in results]
+
+        logger.info("   ↳ ❌ 查找引用失败: 未找到任何引用")
+        # 返回空列表而不是 None 是查找引用的标准行为
+        return []
+
+    except Exception as e:
+        logger.error(f"lsp_references 崩溃: {e}")
+        return []
 
 
 # --- 逻辑控制 ---
