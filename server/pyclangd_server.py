@@ -90,7 +90,7 @@ def index_worker(cmd_info, lib_path):
             continue
             
         # 4. 干掉 Clang 不认识的 GCC 专属参数
-        if arg in ('-fconserve-stack', '-fno-var-tracking-assignments', '-fmerge-all-constants') or arg.startswith(('-mabi=', '-falign-kernels')):
+        if arg in ('-fconserve-stack', '-fno-var-tracking-assignments', '-fmerge-all-constants', '-fno-allow-store-data-races') or arg.startswith(('-mabi=', '-falign-kernels', '-mpreferred-stack-boundary=')):
             continue
 
         # 5. 干掉可能会导致 libclang 报错的参数：仅针对依赖生成与强制报错
@@ -113,7 +113,9 @@ def index_worker(cmd_info, lib_path):
     compiler_args.append('-Wno-error')               # 绝不把警告升级为错误
     compiler_args.append('-Wno-strict-prototypes')   # 忽略没有原型的函数报错
     compiler_args.append('-Wno-implicit-int')        # 忽略老代码没写返回值类型的报错
-    compiler_args.append('-Wno-unknown-warning-option') # <--- 【新增】：让 Clang 忽略它不认识的 GCC 参数
+    compiler_args.append('-Wno-unknown-warning-option') # 让 Clang 忽略它不认识的警告 GCC 参数
+    compiler_args.append('-Wno-unknown-attributes')  # 忽略不知道的 attributes
+    compiler_args.append('-Qunused-arguments')       # 忽略未使用的参数
 
     # === 【修复核心】：对付内核代码，必须注入 Working Directory ===
     if directory:
