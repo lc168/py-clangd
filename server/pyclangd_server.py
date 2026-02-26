@@ -23,7 +23,7 @@ from database import Database
 from cindex import Index, Cursor, CursorKind, Config
 
 # 日志定向到 stderr，VS Code 才能在输出窗口显示
-logging.basicConfig(level=logging.INFO,
+logging.basicConfig(level=logging.WARNING,
                     stream=sys.stderr,
                     format='%(levelname)s [%(name)s]: %(message)s'
                     )
