@@ -279,8 +279,10 @@ def lsp_did_save(server: PyClangdServer, params):
 
     # 启动后台线程跑解析，坚决不阻塞 LSP 主线程的 UI 响应
     def reindex_task():
-        success = index_worker(cmd_info, server.lib_path, server.db.db_path)
-        if success is True:
+        worker_res = index_worker(cmd_info, server.lib_path)
+        if worker_res and worker_res[0] == "SUCCESS":
+            _, source_file, mtime, symbols, refs = worker_res
+            server.db.save_index_result(source_file, mtime, symbols, refs)
             server.show_message_log(f"✅ 更新成功: {os.path.basename(file_path)}")
         else:
             server.show_message_log(f"❌ 更新失败: {os.path.basename(file_path)}")
