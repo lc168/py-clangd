@@ -317,7 +317,7 @@ import re
 # 在 PyClangdServer 类中修改或添加定义跳转函数
 @ls.feature(TEXT_DOCUMENT_DEFINITION)
 def lsp_definition(server: PyClangdServer, params):
-    """跳转到定义：先尝试坐标精准匹配，再回退到单词模糊匹配"""
+    """跳转到定义：执行坐标精准匹配 (USR 级)"""
     uri = params.text_document.uri
     file_path = os.path.normpath(uri.replace("file://", ""))
     # LSP Position 是 0-indexed
@@ -346,32 +346,7 @@ def lsp_definition(server: PyClangdServer, params):
                     )
                 ) for fp, sl, sc, el, ec in results]
 
-        # --- 策略 2：单词模糊匹配 (回退方案) ---
-        # 如果坐标没命（比如索引还没更新，或者是一个没抓取到的引用类型）
-        word_match = None
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
-            if line_0 < len(lines):
-                current_line = lines[line_0]
-                for m in re.finditer(r'[a-zA-Z_][a-zA-Z0-9_]*', current_line):
-                    if m.start() <= col_0 <= m.end():
-                        word_match = m.group()
-                        break
-        
-        if word_match:
-            logger.info(f"   ↳ 🔍 坐标未命中，回退到单词搜索: '{word_match}' ...")
-            results = server.db.get_definitions_by_name(word_match)
-            if results:
-                logger.info(f"   ↳ ✅ 单词查找成功: 找到 {len(results)} 个定义")
-                return [Location(
-                    uri=f"file://{fp}",
-                    range=Range(
-                        start=Position(line=sl-1, character=sc-1),
-                        end=Position(line=el-1, character=ec-1)
-                    )
-                ) for fp, sl, sc, el, ec in results]
-
-        logger.info("   ↳ ❌ 跳转失败: 坐标和单词均未找到定义")
+        logger.info("   ↳ ❌ 跳转失败: 坐标未命或未找到定义")
         return None
 
     except Exception as e:
@@ -381,7 +356,7 @@ def lsp_definition(server: PyClangdServer, params):
 
 @ls.feature(TEXT_DOCUMENT_REFERENCES)
 def lsp_references(server: PyClangdServer, params):
-    """查找引用：先精准查找 USR 的所有引用，失败则回退到同名匹配"""
+    """查找引用：执行坐标精准匹配 (USR 级)"""
     uri = params.text_document.uri
     file_path = os.path.normpath(uri.replace("file://", ""))
     line_0 = params.position.line
@@ -407,31 +382,7 @@ def lsp_references(server: PyClangdServer, params):
                         end=Position(line=el-1, character=ec-1)
                     )
                 ) for fp, sl, sc, el, ec in results]
-
-        # --- 策略 2：单词模糊匹配 (回退方案) ---
-        word_match = None
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
-            if line_0 < len(lines):
-                current_line = lines[line_0]
-                for m in re.finditer(r'[a-zA-Z_][a-zA-Z0-9_]*', current_line):
-                    if m.start() <= col_0 <= m.end():
-                        word_match = m.group()
-                        break
-        
-        if word_match:
-            logger.info(f"   ↳ 🔍 坐标未命中，回退到单词搜索引用: '{word_match}' ...")
-            results = server.db.get_references_by_name(word_match)
-            if results:
-                logger.info(f"   ↳ ✅ 单词引用查找成功: 找到 {len(results)} 处引用")
-                return [Location(
-                    uri=f"file://{fp}",
-                    range=Range(
-                        start=Position(line=sl-1, character=sc-1),
-                        end=Position(line=el-1, character=ec-1)
-                    )
-                ) for fp, sl, sc, el, ec in results]
-
+                
         logger.info("   ↳ ❌ 查找引用失败: 未找到任何引用")
         # 返回空列表而不是 None 是查找引用的标准行为
         return []

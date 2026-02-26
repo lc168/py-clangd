@@ -57,7 +57,7 @@ class Database:
                 kind TEXT
             )''')
         
-        # 表 B：位置与引用关系 (保留了起始和结束坐标，兼容现有的 LSP 逻辑)
+        # 表 B：位置与引用关系 (使用 UNIQUE 防爆发)
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS refs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +68,8 @@ class Database:
                 s_col INTEGER,
                 e_line INTEGER,
                 e_col INTEGER,
-                role TEXT
+                role TEXT,
+                UNIQUE(usr, role, file_path, s_line, s_col)
             )''')
         
         # 表 C：增量与状态追踪
@@ -106,9 +107,9 @@ class Database:
             # 字典去重
             self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?)', symbols)
         if refs:
-            # 引用直接插入
+            # 引用直接使用 IGNORE 插入，由于有了 UNIQUE 约束，重复的头文件引用将被直接屏蔽！
             self.cursor.executemany('''
-                INSERT INTO refs (usr, caller_usr, file_path, s_line, s_col, e_line, e_col, role) 
+                INSERT OR IGNORE INTO refs (usr, caller_usr, file_path, s_line, s_col, e_line, e_col, role) 
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', refs)
         self.conn.commit()
@@ -125,7 +126,7 @@ class Database:
             self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?)', symbols)
         if refs:
             self.cursor.executemany('''
-                INSERT INTO refs (usr, caller_usr, file_path, s_line, s_col, e_line, e_col, role) 
+                INSERT OR IGNORE INTO refs (usr, caller_usr, file_path, s_line, s_col, e_line, e_col, role) 
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', refs)
             
