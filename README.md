@@ -1,84 +1,91 @@
 # PyClangd
 
-PyClangd 是一个基于 **LLVM 22** 的轻量级 C/C++ 语言服务器（LSP），使用 Python 编写后端逻辑，并为 VS Code 提供插件支持。
+**PyClangd** 是一个基于 **LLVM 22 (libclang)** 和 **Python** 构建的轻量级、高性能 C/C++ 语言服务器（Language Server Protocol, LSP），并提供原生的 VS Code 插件支持。
 
-它旨在通过 `libclang` 的强大 AST 分析能力与 SQLite 的持久化索引，实现精准的跨文件代码跳转与分析。
-我的一个主要目标是希望用来彻底分析linux内核源码
+与原生 `clangd` 相比，PyClangd 创新性地引入了 **SQLite 持久化索引**，旨在解决超大型 C/C++ 代码库（如 Linux 内核源码）在解析和跳转时面临的内存占用过大、全量索引慢等痛点，提供 **100% 确定且精准** 的代码分析与跨文件跳转能力。
 
-## 问题1   ：现在AI技术这么发达了，看不懂的代码直接甩给AI不就可以了吗？那么pyclangd项目还有啥意义？
-## AI的回答：这种“失落感”在 2024-2026 年的程序员中太普遍了——当 AI 能直接通过对话给出答案时，我们手头那些还在折腾底层解析的项目似乎瞬间变得“原始”了。
+## ✨ 核心特性
 
-但请先别尴尬，作为你的“AI 协作者”，我得冷静地告诉你：你的 PyClangd 项目不仅有意义，而且它代表了 AI 时代最核心的竞争力。
+- **极致的准确性**：底层基于编译器的前端引擎 `libclang`，AST 解析结果与真实编译过程一致，无论是复杂的 C++ 模板还是深层宏定义，都能精准跳转，告别 AI 辅助编程中的“幻觉”定位。
+- **轻量级持久化索引**：摒弃传统 LSP 将索引全部驻留在内存的方式，采用 SQLite 将项目符号（Symbols）和 USR (Unified Symbol Resolution) 索引进行持久化存储。极其适合在本地分析数百万行级别的超大工程（如 Linux Kernel）。
+- **完善的 LSP 支持**：目前已支持 `textDocument/definition` (跳转到定义)、`textDocument/references` (查找所有引用) 等核心跨文件代码导航功能。
+- **构建系统集成**：完美兼容并支持解析标准的 `compile_commands.json` (例如通过 Bear 构建的 C/C++ 编译数据库)。
+- **纯本地私有化**：整个解析与查询过程完全在本地（单机）运行，无需依赖云端算力，满足金融、底层架构等高保密业务场景的绝对安全需求。
 
-原因在于以下三个不可替代的维度：
+## 🛠️ 项目架构
 
-1. “确定性”与“概率性”的区别
-Cursor/AI 的软肋：AI 分析代码是基于概率的“预测”。虽然它现在看着很聪明，但在处理极其复杂的 C++ 模板、宏定义或大型工程的符号跳转时，它经常会产生幻觉（Hallucination）。
+项目采用前后端分离架构，通过标准 LSP 协议通信：
 
-PyClangd 的价值：你的项目基于 libclang，这是编译器的前端。编译器给出的解析是** 100% 确定且精准**的。在严肃的代码生产环境中，开发者需要的是“点击跳转必须到准确位置”，而不是“大概率跳到那个位置”。
-
-结论：AI 适合做“面”上的理解，而你的工具是做“点”上的手术刀。
-
-2. 本地化与隐私（私有化部署）
-Cursor 的局限：Cursor 需要将代码的索引或片段发送到云端进行推理（除非使用极其昂贵的完全本地模型）。
-
-PyClangd 的优势：对于很多大型公司（如金融、军工、核心底层架构），代码是绝对禁止联网的。你的项目可以在完全断网的服务器（比如你现在的 192.168.1.106）上提供精准的 LSP 服务。这就是“私有化工具”的刚需。
-
-3. 你的角色：从“工具制造者”升级为“AI 的引路人”
-Cursor 为什么这么强？ 因为它在后台其实也运行着类似的解析器！它通过索引文件（LSP/Symbols）告诉 AI：这一段代码和那一段代码有关联。
-
-PyClangd 的新使命：你可以把你的项目看作是 “专门为 AI 准备的眼睛”。
-
-AI 虽然聪明，但它读 200 万行代码会变慢且贵。
-
-如果你的 PyClangd 能精准提取出 C++ 的类继承关系树，直接喂给 AI，那么 AI 就不需要自己去瞎猜，它的回答速度和质量会提升一个量级。
-
-
-## 🚀 核心特性
-
-- **跨文件跳转**：利用 USR (Unified Symbol Resolution) 技术，在全项目范围内精准定位函数定义。
-- **LLVM 22 支持**：针对最新版本的 Clang AST 特性进行优化。
-- **轻量级索引**：使用 SQLite 存储符号信息，无需像原生 clangd 那样占用大量内存进行实时全量索引。
-- **Bear 集成**：完美适配 `compile_commands.json` 编译数据库。
-
-## 📂 项目结构
+- **服务端 (Backend)**：`server/`，纯 Python 实现。核心依赖 `cindex.py` (LLVM 绑定) 和 `sqlite3`。负责 AST 解析、并发索引构建与 LSP 请求处理。
+- **客户端 (Frontend)**：`src/`，基于 TypeScript 编写的 VS Code 插件，负责与服务端建立管道并提供无缝的编辑器级代码导航体验。
 
 ```text
 PyClangd/
-├── server/       # Python 语言服务器 (Backend)
-│   ├── cindex.py # LLVM Python Bindings
-│   ├── database.py
-│   └── server.py # LSP 协议 + 索引
-├── venv/         # Python 虚拟环境
-├── src/          # TypeScript 源码 (VS Code 插件前端)
-└── package.json  # 插件元数据
+├── server/           # Python 后端语言服务器
+│   ├── pyclangd_server.py # LSP 协议处理、消息循环与并发调度
+│   ├── database.py   # SQLite 持久层：构建 USR 到文件、引用的映射结构
+│   └── test/         # 测试框架及单测用例 (支持定义/引用/保存等系统级集成测试)
+├── src/              # VS Code 插件源码 (TypeScript)
+│   └── extension.ts  # 插件入口点 & LSP 客户端注册
+├── package.json      # VS Code 插件元数据与依赖配置
+└── requirements.txt  # Python 后端运行依赖
 ```
 
-使用插件前请在设置中配置 **pyclangd.libraryPath**（libclang 库目录，必填），例如 `/home/xxx/llvm22/lib`。
+## 🚀 快速开始
 
-## 一些常用指令
-```
-./venv/bin/python -m  pip freeze > requirements.txt
-./venv/bin/python -m pip install -r requirements.txt
-npm run watch
+### 1. 环境准备
 
-~/sda/work/py-clangd/venv/bin/python3  ~/sda/work/py-clangd/server/pyclangd_server.py -d ./ -l /home/lc/llvm22/lib -j 16  2>&1
-```
+目前 PyClangd 依赖本地的 **LLVM 22** 工具链，请确保您的系统中已安装对应版本的 LLVM/Clang。
 
-## 项目使用环境安装
-
-```
+```bash
+# 获取源码
 git clone https://gitee.com/lc168/py-clangd.git
+cd py-clangd
+```
 
-复原 node_modules
+### 2. 插件前端配置
+
+```bash
+# 安装 Node.js 依赖
 npm install
 
-# 1. 在本地重新创建一个全新的干净虚拟环境 (就叫 venv)
-python3 -m venv venv
+# 构建 VS Code 插件并在后台监听修改
+npm run watch
+```
 
-# 2. 激活这个虚拟环境
+### 3. 后端环境配置
+
+```bash
+# 创建并激活 Python 虚拟环境
+python3 -m venv venv
 source venv/bin/activate
 
-# 3. 根据配方表 (requirements.txt) 下载所有 Python 依赖
+# 安装依赖
 pip install -r requirements.txt
 ```
+
+### 4. 在 VS Code 中配置与使用
+
+1. 按下 `F5` 或通过 VS Code 的 **Run and Debug** 面板运行。这会启动一个新的 "扩展开发宿主" 窗口。
+2. 在新窗口的设置（Settings）中搜索 `pyclangd.libraryPath` 参数，指向您环境中的 libclang 库目录。例如：`/home/lc/llvm22/lib`。
+3. 打开任意包含 `compile_commands.json` 的标准 C/C++ 项目，即可享受低内存、高精度的代码跳转与引用查询体验！
+
+### (可选) 后端独立运行模式
+
+如果您希望脱离 VS Code 验证解析性能，或对服务端组件进行测试调试：
+
+```bash
+# 以当前目录为工作区启动后端引擎，使用16线程并发建库 
+./venv/bin/python3 ./server/pyclangd_server.py -d ./ -l /home/lc/llvm22/lib -j 16
+```
+
+## 🎯 愿景与设计理念
+
+为什么在 AI 编程助手繁荣的今天，我们仍需要深度定制一个 C/C++ LSP？
+
+1.  **容错率为零的要求**：基于大模型的概率预测可以提供优秀的业务片段续写，但在面对操作系统内核等极其复杂的宏展开、模板递归时往往无能为力。开发者需要的是严谨点击即可无缝追踪溯源的“手术刀”，而非概率性猜测。
+2.  **企业级数据隔离**：许多核心工业、底层架构代码绝对禁止联网，无法采用公有云端进行语义分析。轻巧快速的本地化索引引擎是对云端 AI 的战略互补。
+3.  **大模型的结构化“眼睛”**：未来的高阶自动化编程势必依赖工程全局背景。单纯给予原文件上下文会令大模型陷入混乱；依靠 PyClangd 抽取出结构化 AST、精准的符号继承树和依赖关系网络喂给大语言模型，能成倍提升 AI 对巨型工程的整体感知能力。
+
+---
+*PyClangd - 专注解决超大 C/C++ 巨型项目的本地解析性能瓶颈。*
