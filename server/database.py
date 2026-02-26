@@ -117,8 +117,9 @@ class Database:
         """【性能核心】：单次事务完成状态更新、清理与写入"""
         # 1. 更新状态与清理
         self.cursor.execute('INSERT OR REPLACE INTO files VALUES (?, ?, ?)', (file_path, mtime, 'completed'))
+        #删除掉file_path对应的所有记录
         self.cursor.execute('DELETE FROM refs WHERE file_path = ?', (file_path,))
-        
+
         # 2. 写入数据
         if symbols:
             self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?)', symbols)

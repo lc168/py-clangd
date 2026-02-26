@@ -159,7 +159,9 @@ def index_worker(cmd_info, lib_path):
             CursorKind.MEMBER_REF_EXPR,
             CursorKind.DECL_REF_EXPR,
             CursorKind.TYPE_REF,
-            CursorKind.OVERLOADED_DECL_REF
+            CursorKind.OVERLOADED_DECL_REF,
+            CursorKind.MACRO_INSTANTIATION,
+            CursorKind.INCLUSION_DIRECTIVE
         }
         
         DEF_KINDS = {
@@ -485,33 +487,69 @@ def run_index_mode(workspace_dir, lib_path, jobs):
     db = Database(db_path, is_main=True)
     db.enable_speed_mode()
     
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with ProcessPoolExecutor(max_workers=max_workers, max_tasks_per_child=10) as executor:
         # 注意：Worker 不再接收 db_path
-        futures = [executor.submit(index_worker, cmd, lib_path) for cmd in commands_to_run]
+        # ⭐ 核心修复：限制同时在途的任务数量，防止把主进程内存撑爆
+        active_futures = set()
+        cmd_iter = iter(commands_to_run)
+        
+        # 初始投递任务，保持队列略大于工人数量，避免饥饿
+        for _ in range(max_workers * 2):
+            try:
+                cmd = next(cmd_iter)
+                active_futures.add(executor.submit(index_worker, cmd, lib_path))
+            except StopIteration:
+                break
+                
         done = 0
         batch_count = 0
         
-        for future in as_completed(futures):
-            try:
-                worker_res = future.result()
-                if not worker_res: continue
+        import concurrent.futures
+        try:
+            while active_futures:
+                dones, active_futures = concurrent.futures.wait(
+                    active_futures, return_when=concurrent.futures.FIRST_COMPLETED
+                )
                 
-                status, source_file, mtime, symbols, refs = worker_res
-                
-                if status == "SUCCESS":
-                    batch_count += 1
-                    # 每 50 个文件提交一次，平衡性能与事务开销
-                    db.save_index_result(source_file, mtime, symbols, refs, commit=(batch_count >= 50))
-                    if batch_count >= 50: batch_count = 0
-                elif status == "FAILED":
-                    db.update_file_status(source_file, mtime, 'failed')
-                
-                done += 1
-                if done % 20 == 0 or done == len(commands_to_run):
-                    logger.info(f"进度: [{done}/{len(commands_to_run)}] {done/len(commands_to_run)*100:.1f}%")
-            except Exception as e:
-                logger.error(f"❌ 主进程处理子任务异常: {repr(e)}")
-                done += 1
+                for future in dones:
+                    # 补充新的任务
+                    try:
+                        cmd = next(cmd_iter)
+                        active_futures.add(executor.submit(index_worker, cmd, lib_path))
+                    except StopIteration:
+                        pass
+                    
+                    try:
+                        worker_res = future.result()
+                        if not worker_res: continue
+                        
+                        status, source_file, mtime, symbols, refs = worker_res
+                        
+                        if status == "SUCCESS":
+                            batch_count += 1
+                            # 每 50 个文件提交一次，平衡性能与事务开销
+                            db.save_index_result(source_file, mtime, symbols, refs, commit=(batch_count >= 50))
+                            if batch_count >= 50: batch_count = 0
+                        elif status == "FAILED":
+                            db.update_file_status(source_file, mtime, 'failed')
+                        
+                        done += 1
+                        if done % 20 == 0 or done == len(commands_to_run):
+                            logger.info(f"进度: [{done}/{len(commands_to_run)}] {done/len(commands_to_run)*100:.1f}%")
+                    except Exception as e:
+                        logger.error(f"❌ 主进程处理子任务异常: {repr(e)}")
+                        done += 1
+        except KeyboardInterrupt:
+            logger.warning("\n⚠️ 检测到 Ctrl+C 中断！正在强制终止所有后台解析进程...")
+            # 暴力清理所有由 executor 派生的 worker 子进程，防止孤儿进程
+            for p in executor._processes.values():
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+            db.conn.commit()
+            db.close()
+            sys.exit(1)
 
         # 最后兜底提交
         db.conn.commit()

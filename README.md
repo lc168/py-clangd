@@ -62,7 +62,7 @@ PyClangd/
 ./venv/bin/python -m pip install -r requirements.txt
 npm run watch
 
-~/sda/work/py-clangd/venv/bin/python3  ~/sda/work/py-clangd/server/pyclangd_server.py -d ./ -l /home/lc/llvm22/lib -j 64  2>&1
+~/sda/work/py-clangd/venv/bin/python3  ~/sda/work/py-clangd/server/pyclangd_server.py -d ./ -l /home/lc/llvm22/lib -j 16  2>&1
 ```
 
 ## 项目使用环境安装

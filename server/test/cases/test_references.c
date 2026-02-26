@@ -12,3 +12,8 @@ void use_local() {
     global_ref_target = 0; // @ref_target: g_var
     local_var = 0; // @ref_target: l_var
 }
+
+#define MY_MACRO 1 // @def: my_macro
+#ifdef MY_MACRO // @jump: my_macro
+int a = 1;
+#endif
