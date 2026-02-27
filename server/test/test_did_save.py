@@ -8,7 +8,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
 sys.path.append(parent_dir)
 
-from pyclangd_server import PyClangdServer, lsp_did_save, index_worker
+from pyclangd_server import PyClangdServer, lsp_did_save
 from database import Database
 
 class MockTextDocument:

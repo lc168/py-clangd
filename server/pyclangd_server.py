@@ -36,7 +36,8 @@ logger = logging.getLogger("PyClangd")
 logger.setLevel(logging.INFO)
 
 # --- 独立 Worker 函数 (必须定义在顶层以支持序列化) ---
-def index_worker(cmd_info):
+def parse_to_sqlite(args):
+    cmd_info, db_path = args
     # --- 1. 路径预处理：使用 realpath 消除软链接影响 ---
     directory = cmd_info.get('directory', '')
     file_rel = cmd_info.get('file', '')
@@ -233,16 +234,23 @@ def index_worker(cmd_info):
                             s_line, s_col, s_line, s_col + len(name), role
                         ))
 
-        # 调试：记录成功返回
-        with open("/tmp/pyclangd_worker.log", "a") as f:
-            f.write(f"SUCCESS: {source_file}, symbols={len(symbols_to_upsert)}, refs={len(refs_to_insert)}\n")
-            
-        return "SUCCESS", source_file, mtime, symbols_to_upsert, refs_to_insert
+        db = Database(db_path, is_main=False)
+        db.save_parse_result(source_file, mtime, symbols_to_upsert, refs_to_insert)
+        db.close()
+        
+        return "SUCCESS"
     except Exception as e:
-        with open("/tmp/pyclangd_worker.log", "a") as f:
-            f.write(f"FAILED: {source_file}, error={repr(e)}\n")
+
         logger.error(f"❌ 索引单文件崩溃 [{source_file}]: {repr(e)}")
-        return "FAILED", source_file, mtime, [], []
+        
+        try:
+            db = Database(db_path, is_main=False)
+            db.update_file_status(source_file, mtime, 'failed')
+            db.close()
+        except Exception:
+            pass
+            
+        return "FAILED"
 
 # --- LSP 服务端类 ---
 import threading
@@ -280,10 +288,8 @@ def lsp_did_save(server: PyClangdServer, params):
 
     # 启动后台线程跑解析，坚决不阻塞 LSP 主线程的 UI 响应
     def reindex_task():
-        worker_res = index_worker(cmd_info)
-        if worker_res and worker_res[0] == "SUCCESS":
-            _, source_file, mtime, symbols, refs = worker_res
-            server.db.save_index_result(source_file, mtime, symbols, refs)
+        status = parse_to_sqlite((cmd_info, server.db.db_path))
+        if status == "SUCCESS":
             server.show_message_log(f"✅ 更新成功: {os.path.basename(file_path)}")
         else:
             server.show_message_log(f"❌ 更新失败: {os.path.basename(file_path)}")
@@ -439,13 +445,10 @@ def run_index_mode(workspace_dir, jobs):
 
     logger.info(f"🚀 开始索引: 共 {len(commands)} 个文件，增量需要处理 {len(commands_to_run)} 个, 进程数: {max_workers}")
 
-    # --- 【优化核心】：主进程持有唯一写锁，Worker 只管解析 ---
     db = Database(db_path, is_main=True)
-    db.enable_speed_mode()
     
     from multiprocessing import Pool
     with Pool(processes=max_workers, maxtasksperchild=10) as pool:
-        # 注意：Worker 不再接收 db_path
         done = 0
         batch_count = 0
         
@@ -453,25 +456,13 @@ def run_index_mode(workspace_dir, jobs):
         start_time = time.time()
         
         try:
-            # == 核心魔法：imap_unordered 配合 chunksize ==
-            # 它会自动按需去拿 commands_to_run 里的数据，绝不会一次血坑内存
-            # 谁先完成，就先 yield 谁的结果 (unordered)
-            for worker_res in pool.imap_unordered(index_worker, commands_to_run, chunksize=10):
-                if not worker_res:
+            tasks = [(cmd, db_path) for cmd in commands_to_run]
+            for status in pool.imap_unordered(parse_to_sqlite, tasks, chunksize=10):
+                if not status:
                     continue
                 
-                status, source_file, mtime, symbols, refs = worker_res
-                
-                if status == "SUCCESS":
-                    batch_count += 1
-                    # 每 50 个文件提交一次，平衡性能与事务开销
-                    db.save_index_result(source_file, mtime, symbols, refs, commit=(batch_count >= 50))
-                    if batch_count >= 50: batch_count = 0
-                elif status == "FAILED":
-                    db.update_file_status(source_file, mtime, 'failed')
-                
                 done += 1
-                elapsed  = time.time() - start_time
+                elapsed = time.time() - start_time
                 logger.info(f"进度: [{done}/{len(commands_to_run)}] {done/len(commands_to_run)*100:.1f}% | 耗时: {elapsed:.2f}s")
                 
 

@@ -8,7 +8,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
 sys.path.append(parent_dir)
 
-from pyclangd_server import PyClangdServer, lsp_definition, lsp_references, index_worker
+from pyclangd_server import PyClangdServer, lsp_definition, lsp_references, parse_to_sqlite
 from database import Database
 
 # --- Mock Classes for LSP ---
@@ -156,10 +156,8 @@ def direct_build_db(cases_dir, db_path, files):
         if f_rel.endswith('.cpp'):
             mock_cmd_info["arguments"] = ["clang++", "-xc++", "-std=c++17", "-I" + cases_dir, filepath]
             
-        res = index_worker(mock_cmd_info)
-        if res and res[0] == "SUCCESS":
-            _, source_file, mtime, symbols, refs = res
-            db.save_index_result(source_file, mtime, symbols, refs)
+        # ⭐ 使用独立函数解析文件，并直接存入对应数据库
+        status = parse_to_sqlite((mock_cmd_info, db_path))
     
     db.close()
 
