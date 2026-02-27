@@ -1,0 +1,217 @@
+[
+    {
+        "label": "STATE_IDLE",
+        "source_file": "test_ref_enum.c",
+        "source_line": 10,
+        "expected_targets": [
+            {
+                "file": "test_ref_enum.c",
+                "line": 26
+            },
+            {
+                "file": "test_ref_enum.c",
+                "line": 31
+            },
+            {
+                "file": "test_ref_enum.c",
+                "line": 47
+            }
+        ]
+    },
+    {
+        "label": "NET_OK",
+        "source_file": "test_ref_enum.c",
+        "source_line": 16,
+        "expected_targets": [
+            {
+                "file": "test_ref_enum.c",
+                "line": 39
+            }
+        ]
+    },
+    {
+        "label": "DISK_OK",
+        "source_file": "test_ref_enum.c",
+        "source_line": 21,
+        "expected_targets": [
+            {
+                "file": "test_ref_enum.c",
+                "line": 43
+            }
+        ]
+    },
+    {
+        "label": "helper",
+        "source_file": "test_ref_func.c",
+        "source_line": 9,
+        "expected_targets": [
+            {
+                "file": "test_ref_func.c",
+                "line": 14
+            },
+            {
+                "file": "test_ref_func.c",
+                "line": 18
+            },
+            {
+                "file": "test_ref_func.c",
+                "line": 22
+            }
+        ]
+    },
+    {
+        "label": "compute_a",
+        "source_file": "test_ref_func.c",
+        "source_line": 26,
+        "expected_targets": [
+            {
+                "file": "test_ref_func.c",
+                "line": 35
+            },
+            {
+                "file": "test_ref_func.c",
+                "line": 37
+            }
+        ]
+    },
+    {
+        "label": "compute_b",
+        "source_file": "test_ref_func.c",
+        "source_line": 30,
+        "expected_targets": [
+            {
+                "file": "test_ref_func.c",
+                "line": 36
+            }
+        ]
+    },
+    {
+        "label": "BUF_SIZE",
+        "source_file": "test_ref_macro.c",
+        "source_line": 10,
+        "expected_targets": [
+            {
+                "file": "test_ref_macro.c",
+                "line": 14
+            },
+            {
+                "file": "test_ref_macro.c",
+                "line": 19
+            },
+            {
+                "file": "test_ref_macro.c",
+                "line": 32
+            }
+        ]
+    },
+    {
+        "label": "TIMEOUT",
+        "source_file": "test_ref_macro.c",
+        "source_line": 11,
+        "expected_targets": [
+            {
+                "file": "test_ref_macro.c",
+                "line": 23
+            },
+            {
+                "file": "test_ref_macro.c",
+                "line": 28
+            }
+        ]
+    },
+    {
+        "label": "point_x",
+        "source_file": "test_ref_struct.c",
+        "source_line": 10,
+        "expected_targets": [
+            {
+                "file": "test_ref_struct.c",
+                "line": 21
+            },
+            {
+                "file": "test_ref_struct.c",
+                "line": 26
+            },
+            {
+                "file": "test_ref_struct.c",
+                "line": 30
+            }
+        ]
+    },
+    {
+        "label": "rect_x",
+        "source_file": "test_ref_struct.c",
+        "source_line": 15,
+        "expected_targets": [
+            {
+                "file": "test_ref_struct.c",
+                "line": 34
+            },
+            {
+                "file": "test_ref_struct.c",
+                "line": 39
+            }
+        ]
+    },
+    {
+        "label": "uint32",
+        "source_file": "test_ref_typedef.c",
+        "source_line": 9,
+        "expected_targets": [
+            {
+                "file": "test_ref_typedef.c",
+                "line": 12
+            },
+            {
+                "file": "test_ref_typedef.c",
+                "line": 13
+            },
+            {
+                "file": "test_ref_typedef.c",
+                "line": 16
+            },
+            {
+                "file": "test_ref_typedef.c",
+                "line": 20
+            },
+            {
+                "file": "test_ref_typedef.c",
+                "line": 21
+            },
+            {
+                "file": "test_ref_typedef.c",
+                "line": 27
+            }
+        ]
+    },
+    {
+        "label": "g_var",
+        "source_file": "test_references.c",
+        "source_line": 12,
+        "expected_targets": [
+            {
+                "file": "test_references.c",
+                "line": 1
+            },
+            {
+                "file": "test_references.c",
+                "line": 4
+            }
+        ]
+    },
+    {
+        "label": "l_var",
+        "source_file": "test_references.c",
+        "source_line": 13,
+        "expected_targets": [
+            {
+                "file": "test_references.c",
+                "line": 8
+            },
+            {
+                "file": "test_references.c",
+                "line": 9
+            }
+        ]
+    }
+]

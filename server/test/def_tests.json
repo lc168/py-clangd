@@ -1,0 +1,142 @@
+[
+    {
+        "label": "foo",
+        "source_file": "test_basic.c",
+        "source_line": 5,
+        "target_file": "test_basic.c",
+        "target_line": 1
+    },
+    {
+        "label": "enabled_func",
+        "source_file": "test_cond.c",
+        "source_line": 10,
+        "target_file": "test_cond.c",
+        "target_line": 4
+    },
+    {
+        "label": "BLUE",
+        "source_file": "test_enum_union.c",
+        "source_line": 12,
+        "target_file": "test_enum_union.c",
+        "target_line": 3
+    },
+    {
+        "label": "d_i",
+        "source_file": "test_enum_union.c",
+        "source_line": 14,
+        "target_file": "test_enum_union.c",
+        "target_line": 7
+    },
+    {
+        "label": "func_def",
+        "source_file": "test_forward.c",
+        "source_line": 7,
+        "target_file": "test_forward.c",
+        "target_line": 3
+    },
+    {
+        "label": "target_func:target_func",
+        "source_file": "test_func_ptr.c",
+        "source_line": 5,
+        "target_file": "test_func_ptr.c",
+        "target_line": 1
+    },
+    {
+        "label": "f_ptr:ptr",
+        "source_file": "test_func_ptr.c",
+        "source_line": 6,
+        "target_file": "test_func_ptr.c",
+        "target_line": 4
+    },
+    {
+        "label": "MY_MACRO",
+        "source_file": "test_macro.c",
+        "source_line": 6,
+        "target_file": "test_macro.c",
+        "target_line": 1
+    },
+    {
+        "label": "bar",
+        "source_file": "test_macro.c",
+        "source_line": 7,
+        "target_file": "test_macro.c",
+        "target_line": 3
+    },
+    {
+        "label": "global_func",
+        "source_file": "test_multi.c",
+        "source_line": 6,
+        "target_file": "test_multi.h",
+        "target_line": 5
+    },
+    {
+        "label": "global_var_def",
+        "source_file": "test_multi.c",
+        "source_line": 7,
+        "target_file": "test_multi.c",
+        "target_line": 3
+    },
+    {
+        "label": "inner_member:inner",
+        "source_file": "test_nested.c",
+        "source_line": 11,
+        "target_file": "test_nested.c",
+        "target_line": 6
+    },
+    {
+        "label": "val_member:val",
+        "source_file": "test_nested.c",
+        "source_line": 12,
+        "target_file": "test_nested.c",
+        "target_line": 2
+    },
+    {
+        "label": "my_macro",
+        "source_file": "test_references.c",
+        "source_line": 17,
+        "target_file": "test_references.c",
+        "target_line": 16
+    },
+    {
+        "label": "l_val:val",
+        "source_file": "test_scope.c",
+        "source_line": 5,
+        "target_file": "test_scope.c",
+        "target_line": 4
+    },
+    {
+        "label": "g_val:val",
+        "source_file": "test_scope.c",
+        "source_line": 9,
+        "target_file": "test_scope.c",
+        "target_line": 1
+    },
+    {
+        "label": "id_a:id",
+        "source_file": "test_struct.c",
+        "source_line": 12,
+        "target_file": "test_struct.c",
+        "target_line": 2
+    },
+    {
+        "label": "id_b:id",
+        "source_file": "test_struct.c",
+        "source_line": 13,
+        "target_file": "test_struct.c",
+        "target_line": 6
+    },
+    {
+        "label": "MyInt:MyInt",
+        "source_file": "test_typedef.c",
+        "source_line": 9,
+        "target_file": "test_typedef.c",
+        "target_line": 1
+    },
+    {
+        "label": "p_x:x",
+        "source_file": "test_typedef.c",
+        "source_line": 11,
+        "target_file": "test_typedef.c",
+        "target_line": 4
+    }
+]
