@@ -334,7 +334,7 @@ def lsp_definition(server: PyClangdServer, params):
     line_1 = line_0 + 1
     col_1 = col_0 + 1
     
-    logger.info(f"👉 发起跳转: {os.path.basename(file_path)} 行{line_1} 列{col_1}")
+    logger.info(f"👉 发起跳转: {file_path} 行{line_1} 列{col_1}")
     
     try:
         # --- 策略 1：坐标精准匹配 (USR 级别) ---
@@ -371,7 +371,7 @@ def lsp_references(server: PyClangdServer, params):
     line_1 = line_0 + 1
     col_1 = col_0 + 1
     
-    logger.info(f"👉 查找引用: {os.path.basename(file_path)} 行{line_1} 列{col_1}")
+    logger.info(f"👉 查找引用: {file_path} 行{line_1} 列{col_1}")
     
     try:
         # --- 策略 1：坐标精准匹配 (USR 级别) ---
@@ -443,66 +443,42 @@ def run_index_mode(workspace_dir, jobs):
     db = Database(db_path, is_main=True)
     db.enable_speed_mode()
     
-    with ProcessPoolExecutor(max_workers=max_workers, max_tasks_per_child=10) as executor:
+    from multiprocessing import Pool
+    with Pool(processes=max_workers, maxtasksperchild=10) as pool:
         # 注意：Worker 不再接收 db_path
-        # ⭐ 核心修复：限制同时在途的任务数量，防止把主进程内存撑爆
-        active_futures = set()
-        cmd_iter = iter(commands_to_run)
-        
-        # 初始投递任务，保持队列略大于工人数量，避免饥饿
-        for _ in range(max_workers * 2):
-            try:
-                cmd = next(cmd_iter)
-                active_futures.add(executor.submit(index_worker, cmd))
-            except StopIteration:
-                break
-                
         done = 0
         batch_count = 0
         
-        import concurrent.futures
+        import time
+        start_time = time.time()
+        
         try:
-            while active_futures:
-                dones, active_futures = concurrent.futures.wait(
-                    active_futures, return_when=concurrent.futures.FIRST_COMPLETED
-                )
+            # == 核心魔法：imap_unordered 配合 chunksize ==
+            # 它会自动按需去拿 commands_to_run 里的数据，绝不会一次血坑内存
+            # 谁先完成，就先 yield 谁的结果 (unordered)
+            for worker_res in pool.imap_unordered(index_worker, commands_to_run, chunksize=10):
+                if not worker_res:
+                    continue
                 
-                for future in dones:
-                    # 补充新的任务
-                    try:
-                        cmd = next(cmd_iter)
-                        active_futures.add(executor.submit(index_worker, cmd))
-                    except StopIteration:
-                        pass
-                    
-                    try:
-                        worker_res = future.result()
-                        if not worker_res: continue
-                        
-                        status, source_file, mtime, symbols, refs = worker_res
-                        
-                        if status == "SUCCESS":
-                            batch_count += 1
-                            # 每 50 个文件提交一次，平衡性能与事务开销
-                            db.save_index_result(source_file, mtime, symbols, refs, commit=(batch_count >= 50))
-                            if batch_count >= 50: batch_count = 0
-                        elif status == "FAILED":
-                            db.update_file_status(source_file, mtime, 'failed')
-                        
-                        done += 1
-                        if done % 20 == 0 or done == len(commands_to_run):
-                            logger.info(f"进度: [{done}/{len(commands_to_run)}] {done/len(commands_to_run)*100:.1f}%")
-                    except Exception as e:
-                        logger.error(f"❌ 主进程处理子任务异常: {repr(e)}")
-                        done += 1
+                status, source_file, mtime, symbols, refs = worker_res
+                
+                if status == "SUCCESS":
+                    batch_count += 1
+                    # 每 50 个文件提交一次，平衡性能与事务开销
+                    db.save_index_result(source_file, mtime, symbols, refs, commit=(batch_count >= 50))
+                    if batch_count >= 50: batch_count = 0
+                elif status == "FAILED":
+                    db.update_file_status(source_file, mtime, 'failed')
+                
+                done += 1
+                elapsed  = time.time() - start_time
+                logger.info(f"进度: [{done}/{len(commands_to_run)}] {done/len(commands_to_run)*100:.1f}% | 耗时: {elapsed:.2f}s")
+                
+
         except KeyboardInterrupt:
             logger.warning("\n⚠️ 检测到 Ctrl+C 中断！正在强制终止所有后台解析进程...")
-            # 暴力清理所有由 executor 派生的 worker 子进程，防止孤儿进程
-            for p in executor._processes.values():
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+            pool.terminate() # 一键杀掉池子里所有的进程！
+            pool.join()
             db.conn.commit()
             db.close()
             sys.exit(1)
@@ -514,7 +490,6 @@ def run_index_mode(workspace_dir, jobs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--directory")
-    parser.add_argument("-l", "--libpath", help="Ignored, libclang is now bundled")
     parser.add_argument("-s", "--server", action="store_true")
     parser.add_argument("-j", "--jobs", type=int, default=0)
     args = parser.parse_args()

@@ -13,6 +13,26 @@
                 "${workspaceFolder}/out/**/*.js"
             ]
             // 注意：这里删除了 preLaunchTask，防止它在后台偷偷编译导致 SSH 卡死
+        },
+        {
+            "name": "🐍 调试 Python: test_engine.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/server/test/test_engine.py",
+            "python": "/home/lc/.pyenv/versions/py-clangd-env/bin/python",
+            "subProcess": true,
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/server/test"
+        },
+        {
+            "name": "🐍 调试 Python: 当前打开的文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "python": "/home/lc/.pyenv/versions/py-clangd-env/bin/python",
+            "subProcess": true,
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}"
         }
     ]
 }
