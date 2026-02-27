@@ -11,8 +11,8 @@
             ],
             "outFiles": [
                 "${workspaceFolder}/out/**/*.js"
-            ]
-            // 注意：这里删除了 preLaunchTask，防止它在后台偷偷编译导致 SSH 卡死
+            ],
+            "preLaunchTask": "npm: compile"
         },
         {
             "name": "🐍 调试 Python: test_engine.py",

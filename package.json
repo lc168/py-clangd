@@ -24,26 +24,21 @@
         "title": "Hello World"
       }
     ],
-"configuration": {
-  "title": "PyClangd",
-  "properties": {
-    "pyclangd.libraryPath": {
-      "type": "string",
-      "default": "",
-      "description": "libclang 库目录路径。"
-    },
-    "pyclangd.trace.server": {
-      "type": "string",
-      "enum": [
-        "off",
-        "messages",
-        "verbose"
-      ],
-      "default": "off",
-      "description": "追踪 PyClangd 服务器和 VS Code 之间的通信消息。"
+    "configuration": {
+      "title": "PyClangd",
+      "properties": {
+        "pyclangd.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "追踪 PyClangd 服务器和 VS Code 之间的通信消息。"
+        }
+      }
     }
-  }
-}
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
