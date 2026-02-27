@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # ===- cindex.py - Python Indexing Library Bindings -----------*- python -*--===#
 #
 # Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
