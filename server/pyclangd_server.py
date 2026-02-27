@@ -49,11 +49,11 @@ def parse_to_sqlite(args):
     
     # 暂时跳过汇编文件
     if source_file.endswith(('.S', '.s')):
-        return "SKIP", source_file, 0, [], []
+        return "SKIP"
 
     if not os.path.exists(source_file):
         logger.warning(f"跳过不存在的文件: {source_file}")
-        return "FAILED", source_file, 0, [], []
+        return "FAILED"
 
     idx = Index.create()
     
@@ -432,7 +432,10 @@ def run_index_mode(workspace_dir, jobs):
     commands_to_run = []
     for cmd in commands:
         full_path = os.path.realpath(os.path.join(cmd.get('directory', ''), cmd.get('file', '')))
-        if not os.path.exists(full_path): continue
+        
+        # 暂时跳过汇编和不存在的文件
+        if full_path.endswith(('.S', '.s')) or not os.path.exists(full_path):
+            continue
         
         curr_mtime = os.path.getmtime(full_path)
         # 只要没记录过，或者时间戳变了，就加入重刷队列
