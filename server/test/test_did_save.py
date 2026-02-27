@@ -29,9 +29,6 @@ class MockServer:
                 "arguments": ["clang", "-xc", "-I" + os.path.dirname(c_file), c_file]
             }
         }
-        
-    def show_message_log(self, msg):
-        print(f"[MockServer Log]: {msg}")
 
 def run_test():
     cases_dir = os.path.join(current_dir, "cases")

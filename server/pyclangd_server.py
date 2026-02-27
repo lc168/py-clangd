@@ -284,15 +284,15 @@ def lsp_did_save(server: PyClangdServer, params):
         logger.warning(f"增量跳过: {file_path} 不在 compile_commands 中")
         return
 
-    server.show_message_log(f"触发增量索引: {os.path.basename(file_path)}")
+    logger.info(f"触发增量索引: {os.path.basename(file_path)}")
 
     # 启动后台线程跑解析，坚决不阻塞 LSP 主线程的 UI 响应
     def reindex_task():
         status = parse_to_sqlite((cmd_info, server.db.db_path))
         if status == "SUCCESS":
-            server.show_message_log(f"✅ 更新成功: {os.path.basename(file_path)}")
+            logger.info(f"✅ 更新成功: {os.path.basename(file_path)}")
         else:
-            server.show_message_log(f"❌ 更新失败: {os.path.basename(file_path)}")
+            logger.info(f"❌ 更新失败: {os.path.basename(file_path)}")
 
     threading.Thread(target=reindex_task, daemon=True).start()
 
