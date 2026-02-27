@@ -25,10 +25,6 @@ class MockParams:
         self.text_document = MockTextDocument(uri)
         self.position = MockPosition(line, character)
 
-# --- Helper to find libclang ---
-def find_lib_path():
-    return "/home/lc/llvm22/lib"
-
 # --- Marker Discovery Logic ---
 def discover_tests(cases_dir):
     """
@@ -141,17 +137,11 @@ def discover_tests(cases_dir):
             
     return test_tasks
 
-def direct_build_db(cases_dir, db_path, lib_path, files):
+def direct_build_db(cases_dir, db_path, files):
     print(f"🔨 [1/2] 正在构建索引库 (共 {len(files)} 个文件)...")
     
     if os.path.exists(db_path):
         os.remove(db_path)
-        
-    lib_path = find_lib_path()
-    from cindex import Config
-    try:
-        Config.set_library_path(lib_path)
-    except Exception: pass
 
     db = Database(db_path, is_main=True)
     
@@ -165,7 +155,7 @@ def direct_build_db(cases_dir, db_path, lib_path, files):
         if f_rel.endswith('.cpp'):
             mock_cmd_info["arguments"] = ["clang++", "-xc++", "-std=c++17", "-I" + cases_dir, filepath]
             
-        res = index_worker(mock_cmd_info, lib_path)
+        res = index_worker(mock_cmd_info)
         if res and res[0] == "SUCCESS":
             _, source_file, mtime, symbols, refs = res
             db.save_index_result(source_file, mtime, symbols, refs)
@@ -178,12 +168,6 @@ def run_tests():
         os.makedirs(cases_dir)
         print(f"📅 已创建用例目录: {cases_dir}, 请放入测试文件。")
         return
-
-    lib_path = find_lib_path()
-    if not lib_path:
-        print("❌ 找不到 libclang 库路径，请设置 PYCLANGD_LIB_PATH 环境变量。")
-        return
-    print(f"🔍 使用 libclang 路径: {lib_path}")
 
     db_path = os.path.join(cases_dir, "pyclangd_index.db")
     
@@ -203,7 +187,7 @@ def run_tests():
                 all_files.add(ef)
 
     # 1. 建库
-    direct_build_db(cases_dir, db_path, lib_path, list(all_files))
+    direct_build_db(cases_dir, db_path, list(all_files))
 
     print(f"\n🚀 [2/2] 启动探测引擎 (共 {len(tasks)} 个测试点)...")
     

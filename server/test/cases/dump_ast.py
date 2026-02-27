@@ -5,10 +5,10 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 server_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))
 sys.path.append(server_dir)
 
+import clang_init
 from cindex import Config, Index, CursorKind
 
 def main():
-    Config.set_library_path("/home/lc/llvm22/lib")
     idx = Index.create()
     
     test_file = "test_ifdef.c"

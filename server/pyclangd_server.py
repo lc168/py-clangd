@@ -21,6 +21,7 @@ except ImportError as e:
 
 from database import Database
 from cindex import Index, Cursor, CursorKind, Config
+import clang_init
 
 # 日志定向到 stderr，VS Code 才能在输出窗口显示
 logging.basicConfig(level=logging.WARNING,
@@ -34,7 +35,7 @@ logger = logging.getLogger("PyClangd")
 logger.setLevel(logging.INFO)
 
 # --- 独立 Worker 函数 (必须定义在顶层以支持序列化) ---
-def index_worker(cmd_info, lib_path):
+def index_worker(cmd_info):
     # --- 1. 路径预处理：使用 realpath 消除软链接影响 ---
     directory = cmd_info.get('directory', '')
     file_rel = cmd_info.get('file', '')
@@ -52,8 +53,6 @@ def index_worker(cmd_info, lib_path):
         logger.warning(f"跳过不存在的文件: {source_file}")
         return "FAILED", source_file, 0, [], []
 
-    if not Config.library_path:
-        Config.set_library_path(lib_path)
     idx = Index.create()
     
     # 获取原始参数并进行清洗
@@ -252,7 +251,6 @@ class PyClangdServer(LanguageServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.db = None
-        self.lib_path = None
         self.commands_map = {}
 
     def load_commands_map(self, workspace_dir):
@@ -281,7 +279,7 @@ def lsp_did_save(server: PyClangdServer, params):
 
     # 启动后台线程跑解析，坚决不阻塞 LSP 主线程的 UI 响应
     def reindex_task():
-        worker_res = index_worker(cmd_info, server.lib_path)
+        worker_res = index_worker(cmd_info)
         if worker_res and worker_res[0] == "SUCCESS":
             _, source_file, mtime, symbols, refs = worker_res
             server.db.save_index_result(source_file, mtime, symbols, refs)
@@ -400,12 +398,11 @@ def lsp_references(server: PyClangdServer, params):
 
 
 # --- 索引产生数据库---
-def run_index_mode(workspace_dir, lib_path, jobs):
+def run_index_mode(workspace_dir, jobs):
     """主动索引模式（带增量更新与断点续传）"""
     workspace_dir = os.path.abspath(workspace_dir)
     db_path = os.path.join(workspace_dir, "pyclangd_index.db")
     cc_path = os.path.join(workspace_dir, "compile_commands.json")
-    lib_path = os.path.abspath(lib_path)
     
     if not os.path.exists(cc_path):
         logger.error("未找到 compile_commands.json")
@@ -455,7 +452,7 @@ def run_index_mode(workspace_dir, lib_path, jobs):
         for _ in range(max_workers * 2):
             try:
                 cmd = next(cmd_iter)
-                active_futures.add(executor.submit(index_worker, cmd, lib_path))
+                active_futures.add(executor.submit(index_worker, cmd))
             except StopIteration:
                 break
                 
@@ -473,7 +470,7 @@ def run_index_mode(workspace_dir, lib_path, jobs):
                     # 补充新的任务
                     try:
                         cmd = next(cmd_iter)
-                        active_futures.add(executor.submit(index_worker, cmd, lib_path))
+                        active_futures.add(executor.submit(index_worker, cmd))
                     except StopIteration:
                         pass
                     
@@ -516,24 +513,12 @@ def run_index_mode(workspace_dir, lib_path, jobs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--directory")
-    parser.add_argument("-l", "--libpath")
+    parser.add_argument("-l", "--libpath", help="Ignored, libclang is now bundled")
     parser.add_argument("-s", "--server", action="store_true")
     parser.add_argument("-j", "--jobs", type=int, default=0)
     args = parser.parse_args()
 
-    if args.libpath:
-        # # 1. 先只导入 Config，不要碰 Index 或 Cursor
-        # from cindex import Config
-        try:
-            Config.set_library_path(args.libpath)
-            logger.info(f"设置 LLVM 22 库路径: {args.libpath}")
-        except Exception as e:
-            logger.critical(f"main 无法加载 LLVM 库: {e}")
-            logger.critical("发现致命配置错误，直接退出")
-            sys.exit(1) # 发现致命配置错误，直接退出
-
     if args.server:
-        ls.lib_path = args.libpath
         ls.load_commands_map(args.directory)
 
         db_path = os.path.join(args.directory, "pyclangd_index.db")
@@ -542,7 +527,7 @@ def main():
             logger.info("LSP Server 加载数据库成功")
         ls.start_io()
     else:
-        run_index_mode(args.directory, args.libpath, args.jobs)
+        run_index_mode(args.directory, args.jobs)
 
 if __name__ == "__main__":
     main()

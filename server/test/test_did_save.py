@@ -9,7 +9,6 @@ sys.path.append(parent_dir)
 
 from pyclangd_server import PyClangdServer, lsp_did_save, index_worker
 from database import Database
-from test_engine import find_lib_path
 
 class MockTextDocument:
     def __init__(self, uri):
@@ -20,7 +19,7 @@ class MockParams:
         self.text_document = MockTextDocument(uri)
 
 class MockServer:
-    def __init__(self, db_instance, c_file, lib_path):
+    def __init__(self, db_instance, c_file):
         self.db = db_instance
         self.commands_map = {
             os.path.realpath(c_file): {
@@ -29,7 +28,6 @@ class MockServer:
                 "arguments": ["clang", "-xc", "-I" + os.path.dirname(c_file), c_file]
             }
         }
-        self.lib_path = lib_path
         
     def show_message_log(self, msg):
         print(f"[MockServer Log]: {msg}")
@@ -38,19 +36,13 @@ def run_test():
     cases_dir = os.path.join(current_dir, "cases")
     db_path = os.path.join(cases_dir, "test_did_save.db")
     c_file = os.path.join(cases_dir, "test_did_save_target.c")
-    lib_path = find_lib_path()
     
     if os.path.exists(db_path):
         os.remove(db_path)
-        
-    from cindex import Config
-    try:
-        Config.set_library_path(lib_path)
-    except Exception: pass
 
     # Initialize basic DB
     db = Database(db_path, is_main=True)
-    server = MockServer(db, c_file, lib_path)
+    server = MockServer(db, c_file)
     
     print("="*60)
     print("🧪 测试 lsp_did_save 接口开始")

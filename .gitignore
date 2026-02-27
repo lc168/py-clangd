@@ -10,6 +10,7 @@ venv/
 __pycache__/
 *.pyc
 *.pyo
+.python-version
 
 # --- 数据库 & 缓存 (极度重要) ---
 pyclangd_index.db
@@ -20,3 +21,6 @@ compile_commands.json
 # --- OS 自动生成文件 ---
 .DS_Store
 Thumbs.db
+
+#暂时忽略so文件
+server/libs/libclang.so
