@@ -49,6 +49,335 @@
         "target_line": 4
     },
     {
+        "label": "EXPORT_SYMBOL",
+        "source_file": "test_kernel_def.c",
+        "source_line": 25,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 13
+    },
+    {
+        "label": "EXPORT_SYMBOL_GPL",
+        "source_file": "test_kernel_def.c",
+        "source_line": 30,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 14
+    },
+    {
+        "label": "module_init",
+        "source_file": "test_kernel_def.c",
+        "source_line": 34,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 124
+    },
+    {
+        "label": "subsys_initcall",
+        "source_file": "test_kernel_def.c",
+        "source_line": 35,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 119
+    },
+    {
+        "label": "module_platform_driver",
+        "source_file": "test_kernel_def.c",
+        "source_line": 43,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 139
+    },
+    {
+        "label": "DEVICE_ATTR",
+        "source_file": "test_kernel_def.c",
+        "source_line": 50,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 168
+    },
+    {
+        "label": "DEVICE_ATTR_RO",
+        "source_file": "test_kernel_def.c",
+        "source_line": 53,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 171
+    },
+    {
+        "label": "DECLARE_BITMAP",
+        "source_file": "test_kernel_def.c",
+        "source_line": 56,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 180
+    },
+    {
+        "label": "TRACE_EVENT",
+        "source_file": "test_kernel_def.c",
+        "source_line": 59,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 13
+    },
+    {
+        "label": "kthread_run",
+        "source_file": "test_kernel_def.c",
+        "source_line": 72,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 71
+    },
+    {
+        "label": "EXPORT_PER_CPU_SYMBOL",
+        "source_file": "test_kernel_def.c",
+        "source_line": 76,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 155
+    },
+    {
+        "label": "early_param",
+        "source_file": "test_kernel_def.c",
+        "source_line": 80,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 111
+    },
+    {
+        "label": "seq_start:start",
+        "source_file": "test_kernel_def.c",
+        "source_line": 86,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 160
+    },
+    {
+        "label": "KERNEL_VERSION",
+        "source_file": "test_kernel_use.c",
+        "source_line": 11,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 16
+    },
+    {
+        "label": "global_sys_status_def",
+        "source_file": "test_kernel_use.c",
+        "source_line": 14,
+        "target_file": "test_kernel_def.c",
+        "target_line": 4
+    },
+    {
+        "label": "runqueues_def",
+        "source_file": "test_kernel_use.c",
+        "source_line": 17,
+        "target_file": "test_kernel_def.c",
+        "target_line": 5
+    },
+    {
+        "label": "ns_dev_id:dev_id",
+        "source_file": "test_kernel_use.c",
+        "source_line": 21,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 19
+    },
+    {
+        "label": "task_pid:pid",
+        "source_file": "test_kernel_use.c",
+        "source_line": 25,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 15
+    },
+    {
+        "label": "init_task",
+        "source_file": "test_kernel_use.c",
+        "source_line": 28,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 29
+    },
+    {
+        "label": "my_module_list:list",
+        "source_file": "test_kernel_use.c",
+        "source_line": 33,
+        "target_file": "test_kernel_use.c",
+        "target_line": 6
+    },
+    {
+        "label": "container_of",
+        "source_file": "test_kernel_use.c",
+        "source_line": 36,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 22
+    },
+    {
+        "label": "list_entry",
+        "source_file": "test_kernel_use.c",
+        "source_line": 39,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 27
+    },
+    {
+        "label": "my_module_id:id",
+        "source_file": "test_kernel_use.c",
+        "source_line": 41,
+        "target_file": "test_kernel_use.c",
+        "target_line": 5
+    },
+    {
+        "label": "dma_addr:dma_addr",
+        "source_file": "test_kernel_use.c",
+        "source_line": 48,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 33
+    },
+    {
+        "label": "flags:flags",
+        "source_file": "test_kernel_use.c",
+        "source_line": 49,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 34
+    },
+    {
+        "label": "device_init_fn:device_init_fn",
+        "source_file": "test_kernel_use.c",
+        "source_line": 54,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 30
+    },
+    {
+        "label": "ALIGN",
+        "source_file": "test_kernel_use.c",
+        "source_line": 69,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 40
+    },
+    {
+        "label": "IS_ERR",
+        "source_file": "test_kernel_use.c",
+        "source_line": 72,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 67
+    },
+    {
+        "label": "PTR_ERR",
+        "source_file": "test_kernel_use.c",
+        "source_line": 73,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 66
+    },
+    {
+        "label": "preempt_disable",
+        "source_file": "test_kernel_use.c",
+        "source_line": 79,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 167
+    },
+    {
+        "label": "rcu_read_lock",
+        "source_file": "test_kernel_use.c",
+        "source_line": 81,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 114
+    },
+    {
+        "label": "rcu_dereference",
+        "source_file": "test_kernel_use.c",
+        "source_line": 83,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 62
+    },
+    {
+        "label": "rcu_read_unlock",
+        "source_file": "test_kernel_use.c",
+        "source_line": 84,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 115
+    },
+    {
+        "label": "preempt_enable",
+        "source_file": "test_kernel_use.c",
+        "source_line": 85,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 168
+    },
+    {
+        "label": "list_for_each_entry",
+        "source_file": "test_kernel_use.c",
+        "source_line": 93,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 26
+    },
+    {
+        "label": "my_module_id:id",
+        "source_file": "test_kernel_use.c",
+        "source_line": 94,
+        "target_file": "test_kernel_use.c",
+        "target_line": 5
+    },
+    {
+        "label": "BUG_ON",
+        "source_file": "test_kernel_use.c",
+        "source_line": 101,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 91
+    },
+    {
+        "label": "WARN_ON",
+        "source_file": "test_kernel_use.c",
+        "source_line": 102,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 92
+    },
+    {
+        "label": "BUILD_BUG_ON",
+        "source_file": "test_kernel_use.c",
+        "source_line": 103,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 34
+    },
+    {
+        "label": "per_cpu_ptr",
+        "source_file": "test_kernel_use.c",
+        "source_line": 108,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 61
+    },
+    {
+        "label": "smp_processor_id",
+        "source_file": "test_kernel_use.c",
+        "source_line": 112,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 57
+    },
+    {
+        "label": "raw_smp_processor_id",
+        "source_file": "test_kernel_use.c",
+        "source_line": 113,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 56
+    },
+    {
+        "label": "do_div",
+        "source_file": "test_kernel_use.c",
+        "source_line": 120,
+        "target_file": "test_kernel_headers_part2.h",
+        "target_line": 118
+    },
+    {
+        "label": "dev_node_name:name",
+        "source_file": "test_kernel_use.c",
+        "source_line": 127,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 55
+    },
+    {
+        "label": "dev_node_parent:parent",
+        "source_file": "test_kernel_use.c",
+        "source_line": 128,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 57
+    },
+    {
+        "label": "ATOMIC_INIT",
+        "source_file": "test_kernel_use.c",
+        "source_line": 132,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 48
+    },
+    {
+        "label": "counter:counter",
+        "source_file": "test_kernel_use.c",
+        "source_line": 133,
+        "target_file": "test_kernel_headers.h",
+        "target_line": 47
+    },
+    {
         "label": "MY_MACRO",
         "source_file": "test_macro.c",
         "source_line": 6,

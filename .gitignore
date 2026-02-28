@@ -25,4 +25,4 @@ Thumbs.db
 #暂时忽略so文件
 server/libs/libclang.so
 
-
+*.o

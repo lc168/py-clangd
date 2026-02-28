@@ -12,8 +12,11 @@ try:
     from pygls.server import LanguageServer
     from lsprotocol.types import (
         TEXT_DOCUMENT_DEFINITION, TEXT_DOCUMENT_DOCUMENT_SYMBOL, WORKSPACE_SYMBOL,
-        TEXT_DOCUMENT_REFERENCES,
-        Location, Range, Position, SymbolInformation, SymbolKind, DocumentSymbol, MessageType
+        TEXT_DOCUMENT_REFERENCES, TEXT_DOCUMENT_CODE_ACTION, WORKSPACE_EXECUTE_COMMAND,
+        Location, Range, Position, SymbolInformation, SymbolKind, DocumentSymbol, MessageType,
+        CodeAction, CodeActionKind, Command, CodeActionParams, ExecuteCommandParams,
+        WorkspaceEdit, TextEdit, TextDocumentEdit, OptionalVersionedTextDocumentIdentifier,
+        ApplyWorkspaceEditParams
     )
     from lsprotocol.types import TEXT_DOCUMENT_DID_SAVE
 except ImportError as e:
@@ -145,6 +148,16 @@ def parse_to_sqlite(args):
         # # ⭐ 临时加的，用于调试test
         # return "test", source_file, mtime, [], []
 
+        included_files = []
+        for inc in tu.get_includes():
+            if inc.include and inc.include.name:
+                inc_path = os.path.realpath(inc.include.name)
+                # 留空 exact_path_string，之后在 walk_preorder 里补齐
+                included_files.append((inc_path, ""))
+
+        # 用于快速查找并更新 exact_path
+        inc_path_to_exact = {}
+
         for diag in tu.diagnostics:
             if diag.severity >= 3:
                 logger.warning(f"编译报错 [{source_file}]:args={compiler_args}")
@@ -215,6 +228,15 @@ def parse_to_sqlite(args):
 
             # --- 角色 B: 引用与调用 (ref/call) ---
             if kind in REF_KINDS:
+                if kind == CursorKind.INCLUSION_DIRECTIVE:
+                    exact_path = node.spelling
+                    if exact_path:
+                        inc_file = node.get_included_file()
+                        if inc_file and inc_file.name:
+                            inc_path = os.path.realpath(inc_file.name)
+                            inc_path_to_exact[inc_path] = exact_path
+                    continue
+                    
                 target = node.referenced
                 if target:
                     usr = target.get_usr()
@@ -234,8 +256,11 @@ def parse_to_sqlite(args):
                             s_line, s_col, s_line, s_col + len(name), role
                         ))
 
+        # 更新 included_files 的 exact_path
+        included_files = [(path, inc_path_to_exact.get(path, "")) for path, _ in included_files]
+
         db = Database(db_path, is_main=False)
-        db.save_parse_result(source_file, mtime, symbols_to_upsert, refs_to_insert)
+        db.save_parse_result(source_file, mtime, symbols_to_upsert, refs_to_insert, included_files)
         db.close()
         
         return "SUCCESS"
@@ -279,20 +304,41 @@ def lsp_did_save(server: PyClangdServer, params):
     """当 VS Code 里按下 Ctrl+S，触发单文件增量更新"""
     file_path = os.path.normpath(params.text_document.uri.replace("file://", ""))
     
+    # 获取这个文件被哪些源文件包含，或者它本身就是源文件
+    dependent_sources = []
+    if server.db:
+        dependent_sources = server.db.get_sources_including(file_path)
+
     cmd_info = server.commands_map.get(file_path)
-    if not cmd_info:
-        logger.warning(f"增量跳过: {file_path} 不在 compile_commands 中")
+    files_to_index = []
+
+    if cmd_info:
+        # 该文件在 compile_commands 中（一般是.c文件），将它本身加入
+        files_to_index.append((file_path, cmd_info))
+    
+    # 把受影响的源文件也加入重新索引的队列
+    for dep_src in dependent_sources:
+        if dep_src == file_path:
+            continue
+        dep_cmd = server.commands_map.get(dep_src)
+        if dep_cmd and not any(f[0] == dep_src for f in files_to_index):
+            files_to_index.append((dep_src, dep_cmd))
+
+    if not files_to_index:
+        logger.warning(f"增量跳过: {file_path} 不在 compile_commands 中，且无关联源文件包含它")
         return
 
-    logger.info(f"触发增量索引: {os.path.basename(file_path)}")
+    logger.info(f"触发增量索引: {os.path.basename(file_path)}, 连带 {len(files_to_index)-1 if cmd_info else len(files_to_index)} 个依赖文件")
 
     # 启动后台线程跑解析，坚决不阻塞 LSP 主线程的 UI 响应
     def reindex_task():
-        status = parse_to_sqlite((cmd_info, server.db.db_path))
-        if status == "SUCCESS":
-            logger.info(f"✅ 更新成功: {os.path.basename(file_path)}")
-        else:
-            logger.info(f"❌ 更新失败: {os.path.basename(file_path)}")
+        for src, cmd in files_to_index:
+            # logger.info(f"[开始解析] {src}")
+            status = parse_to_sqlite((cmd, server.db.db_path))
+            if status == "SUCCESS":
+                logger.info(f"✅ 更新成功: {os.path.basename(src)}")
+            else:
+                logger.info(f"❌ 更新失败: {os.path.basename(src)}")
 
     threading.Thread(target=reindex_task, daemon=True).start()
 
@@ -343,6 +389,29 @@ def lsp_definition(server: PyClangdServer, params):
     logger.info(f"👉 发起跳转: {file_path} 行{line_1} 列{col_1}")
     
     try:
+        # --- 策略 0：检查是否是头文件字面量点击 ---
+        # 尝试读取光标所在行的文本
+        doc = server.workspace.get_text_document(uri)
+        if doc and line_0 < len(doc.lines):
+            line_text = doc.lines[line_0]
+            # 如果这一行看起来像 #include 语句
+            if "#include" in line_text:
+                # 提取尖括号或双引号内的路径
+                import re
+                match = re.search(r'#include\s*[<"]([^>"]+)[>"]', line_text)
+                if match:
+                    exact_path_clicked = match.group(1)
+                    inc_path = server.db.get_include_by_exact_path(file_path, exact_path_clicked)
+                    if inc_path and os.path.exists(inc_path):
+                        logger.info(f"   ↳ 🎯 触发头文件直接跳转: {exact_path_clicked} -> {inc_path}")
+                        return [Location(
+                            uri=f"file://{inc_path}",
+                            range=Range(
+                                start=Position(line=0, character=0),
+                                end=Position(line=0, character=0)
+                            )
+                        )]
+
         # --- 策略 1：坐标精准匹配 (USR 级别) ---
         usr = server.db.get_usr_at_location(file_path, line_1, col_1)
         if usr:
@@ -403,6 +472,162 @@ def lsp_references(server: PyClangdServer, params):
         logger.error(f"lsp_references 崩溃: {e}")
         return []
 
+
+@ls.feature(TEXT_DOCUMENT_CODE_ACTION)
+def lsp_code_action(server: PyClangdServer, params: CodeActionParams):
+    """当光标停留在一行上，请求代码操作"""
+    uri = params.text_document.uri
+    file_path = os.path.normpath(uri.replace("file://", ""))
+    
+    line_1 = params.range.start.line + 1
+    col_1 = params.range.start.character + 1
+    
+    if not server.db:
+        return None
+        
+    usr = server.db.get_usr_at_location(file_path, line_1, col_1)
+    if usr and server.db.is_macro(usr):
+        return [
+            CodeAction(
+                title="🔬 完全展开宏 (py-clangd)",
+                kind=CodeActionKind.RefactorRewrite,
+                command=Command(
+                    title="完全展开宏",
+                    command="pyclangd.expandMacro",
+                    arguments=[uri, params.range.start.line, params.range.start.character]
+                )
+            )
+        ]
+    return None
+
+import tempfile
+import re
+
+@ls.feature(WORKSPACE_EXECUTE_COMMAND)
+def lsp_execute_command(server: PyClangdServer, params: ExecuteCommandParams):
+    if params.command == "pyclangd.expandMacro":
+        try:
+            uri, line_0, col_0 = params.arguments
+            file_path = os.path.normpath(uri.replace("file://", ""))
+            
+            cmd_info = server.commands_map.get(file_path)
+            if not cmd_info:
+                logger.error(f"Cannot expand macro: missing compile_commands mapping for {file_path}")
+                return
+            
+            idx = Index.create()
+            
+            raw_args = cmd_info.get('arguments', [])
+            if not raw_args:
+                command_str = cmd_info.get('command', '')
+                if command_str: raw_args = shlex.split(command_str)
+            
+            compiler_args = []
+            skip_next = False
+            for arg in raw_args[1:]:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if arg == '-o':
+                    skip_next = True
+                    continue
+                if arg in ('-c', '-S'): continue
+                if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')): continue
+                if arg == '-MF':
+                    skip_next = True
+                    continue
+                compiler_args.append(arg)
+            
+            compiler_args.append('-fsyntax-only')
+            compiler_args.extend([
+                '-ferror-limit=0', '-Wno-error', '-Wno-strict-prototypes',
+                '-Wno-implicit-int', '-Wno-unknown-warning-option',
+                '-Wno-unknown-attributes', '-Qunused-arguments'
+            ])
+            
+            directory = cmd_info.get('directory', '')
+            if directory:
+                compiler_args.extend(['-working-directory', directory])
+                
+            compiler_path = raw_args[0] if raw_args else ''
+            if 'aarch64' in compiler_path or 'arm64' in compiler_path:
+                compiler_args.append('--target=aarch64-linux-gnu')
+            elif 'arm' in compiler_path:
+                compiler_args.append('--target=arm-linux-gnueabihf')
+                
+            builtin_includes = '/home/lc/llvm22/lib/clang/22/include' 
+            compiler_args.extend(['-isystem', builtin_includes])
+
+            tu = idx.parse(file_path, args=compiler_args, options=0x01)
+            
+            target_node = None
+            line_1 = line_0 + 1
+            col_1 = col_0 + 1
+            for node in tu.cursor.walk_preorder():
+                if node.kind == CursorKind.MACRO_INSTANTIATION:
+                    loc = node.extent
+                    if loc.start.line == line_1 and loc.start.column <= col_1 <= loc.end.column:
+                        target_node = node
+                        break
+                        
+            if not target_node:
+                logger.error(f"Cannot find MACRO_INSTANTIATION at {line_1}:{col_1}")
+                return
+                
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                
+            s_line = target_node.extent.start.line - 1
+            s_col = target_node.extent.start.column - 1
+            e_line = target_node.extent.end.line - 1
+            e_col = target_node.extent.end.column - 1
+            
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".c", dir=os.path.dirname(file_path))
+            os.close(tmp_fd)
+            
+            try:
+                mod_lines = lines.copy()
+                mod_lines[e_line] = mod_lines[e_line][:e_col] + "/*PYCLANGD_END*/" + mod_lines[e_line][e_col:]
+                mod_lines[s_line] = mod_lines[s_line][:s_col] + "/*PYCLANGD_START*/" + mod_lines[s_line][s_col:]
+                
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    f.writelines(mod_lines)
+                
+                clang_e_args = compiler_args.copy()
+                if '-fsyntax-only' in clang_e_args:
+                    clang_e_args.remove('-fsyntax-only')
+                
+                import subprocess
+                cmd = ["clang", "-E", "-C"] + clang_e_args + [tmp_path]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                output = result.stdout
+                
+                match = re.search(r'/\*PYCLANGD_START\*/(.*?)/\*PYCLANGD_END\*/', output, re.DOTALL)
+                if match:
+                    expanded_text = match.group(1).strip()
+                    logger.info(f"成功展开宏: {expanded_text}")
+                    
+                    edit = WorkspaceEdit(
+                        changes={
+                            uri: [
+                                TextEdit(
+                                    range=Range(
+                                        start=Position(line=s_line, character=s_col),
+                                        end=Position(line=e_line, character=e_col)
+                                    ),
+                                    new_text=expanded_text
+                                )
+                            ]
+                        }
+                    )
+                    server.lsp.send_request("workspace/applyEdit", ApplyWorkspaceEditParams(edit=edit, label="展开宏"))
+                else:
+                    logger.error("Failed to extract expanded text")
+            finally:
+                os.remove(tmp_path)
+        except Exception as e:
+            logger.error(f"Expand macro error: {e}")
 
 # --- 索引产生数据库---
 def run_index_mode(workspace_dir, jobs):
