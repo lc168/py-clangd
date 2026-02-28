@@ -300,11 +300,13 @@ def parse_to_sqlite(args):
 # --- LSP 服务端类 ---
 import threading
 
+import typing
+
 # 在 PyClangdServer 初始化时，存一下命令字典，方便单文件查询
 class PyClangdServer(LanguageServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.db = None
+        self.db: typing.Optional[Database] = None
         self.commands_map = {}
 
     def load_commands_map(self, workspace_dir):
@@ -509,128 +511,31 @@ import re
 @ls.feature(WORKSPACE_EXECUTE_COMMAND)
 def lsp_execute_command(server: PyClangdServer, params: ExecuteCommandParams):
     if params.command == "pyclangd.expandMacro":
-        try:
-            uri, line_0, col_0 = params.arguments
-            file_path = os.path.normpath(uri.replace("file://", ""))
+        if not server.db:
+            return
             
-            cmd_info = server.commands_map.get(file_path)
-            if not cmd_info:
-                logger.error(f"Cannot expand macro: missing compile_commands mapping for {file_path}")
-                return
-            
-            idx = Index.create()
-            
-            raw_args = cmd_info.get('arguments', [])
-            if not raw_args:
-                command_str = cmd_info.get('command', '')
-                if command_str: raw_args = shlex.split(command_str)
-            
-            compiler_args = []
-            skip_next = False
-            for arg in raw_args[1:]:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if arg == '-o':
-                    skip_next = True
-                    continue
-                if arg in ('-c', '-S'): continue
-                if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')): continue
-                if arg == '-MF':
-                    skip_next = True
-                    continue
-                compiler_args.append(arg)
-            
-            compiler_args.append('-fsyntax-only')
-            compiler_args.extend([
-                '-ferror-limit=0', '-Wno-error', '-Wno-strict-prototypes',
-                '-Wno-implicit-int', '-Wno-unknown-warning-option',
-                '-Wno-unknown-attributes', '-Qunused-arguments'
-            ])
-            
-            directory = cmd_info.get('directory', '')
-            if directory:
-                compiler_args.extend(['-working-directory', directory])
-                
-            compiler_path = raw_args[0] if raw_args else ''
-            if 'aarch64' in compiler_path or 'arm64' in compiler_path:
-                compiler_args.append('--target=aarch64-linux-gnu')
-            elif 'arm' in compiler_path:
-                compiler_args.append('--target=arm-linux-gnueabihf')
-                
-            builtin_includes = '/home/lc/llvm22/lib/clang/22/include' 
-            compiler_args.extend(['-isystem', builtin_includes])
-
-            tu = idx.parse(file_path, args=compiler_args, options=0x01)
-            
-            target_node = None
-            line_1 = line_0 + 1
-            col_1 = col_0 + 1
-            for node in tu.cursor.walk_preorder():
-                if node.kind == CursorKind.MACRO_INSTANTIATION:
-                    loc = node.extent
-                    if loc.start.line == line_1 and loc.start.column <= col_1 <= loc.end.column:
-                        target_node = node
-                        break
-                        
-            if not target_node:
-                logger.error(f"Cannot find MACRO_INSTANTIATION at {line_1}:{col_1}")
-                return
-                
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-                
-            s_line = target_node.extent.start.line - 1
-            s_col = target_node.extent.start.column - 1
-            e_line = target_node.extent.end.line - 1
-            e_col = target_node.extent.end.column - 1
-            
-            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".c", dir=os.path.dirname(file_path))
-            os.close(tmp_fd)
-            
-            try:
-                mod_lines = lines.copy()
-                mod_lines[e_line] = mod_lines[e_line][:e_col] + "/*PYCLANGD_END*/" + mod_lines[e_line][e_col:]
-                mod_lines[s_line] = mod_lines[s_line][:s_col] + "/*PYCLANGD_START*/" + mod_lines[s_line][s_col:]
-                
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    f.writelines(mod_lines)
-                
-                clang_e_args = compiler_args.copy()
-                if '-fsyntax-only' in clang_e_args:
-                    clang_e_args.remove('-fsyntax-only')
-                
-                import subprocess
-                cmd = ["clang", "-E", "-C"] + clang_e_args + [tmp_path]
-                
-                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                output = result.stdout
-                
-                match = re.search(r'/\*PYCLANGD_START\*/(.*?)/\*PYCLANGD_END\*/', output, re.DOTALL)
-                if match:
-                    expanded_text = match.group(1).strip()
-                    logger.info(f"成功展开宏: {expanded_text}")
-                    
-                    edit = WorkspaceEdit(
-                        changes={
-                            uri: [
-                                TextEdit(
-                                    range=Range(
-                                        start=Position(line=s_line, character=s_col),
-                                        end=Position(line=e_line, character=e_col)
-                                    ),
-                                    new_text=expanded_text
-                                )
-                            ]
-                        }
-                    )
-                    server.lsp.send_request("workspace/applyEdit", ApplyWorkspaceEditParams(edit=edit, label="展开宏"))
-                else:
-                    logger.error("Failed to extract expanded text")
-            finally:
-                os.remove(tmp_path)
-        except Exception as e:
-            logger.error(f"Expand macro error: {e}")
+        res = server.db.lsp_execute_command_db(params.command, params.arguments, server.commands_map)
+        
+        if res and res.get("success"):
+            uri = params.arguments[0] # The URI
+            expanded_text = res["text"]
+            edit = WorkspaceEdit(
+                changes={
+                    uri: [
+                        TextEdit(
+                            range=Range(
+                                start=Position(line=res["s_line"], character=res["s_col"]),
+                                end=Position(line=res["e_line"], character=res["e_col"])
+                            ),
+                            new_text=expanded_text
+                        )
+                    ]
+                }
+            )
+            server.lsp.send_request("workspace/applyEdit", ApplyWorkspaceEditParams(edit=edit, label="展开宏"))
+            logger.info(f"成功展开宏: {expanded_text}")
+        elif res and "error" in res:
+            logger.error(f"Expand macro error: {res['error']}")
 
 # --- 索引产生数据库---
 def run_index_mode(workspace_dir, jobs):

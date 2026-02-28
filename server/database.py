@@ -209,12 +209,147 @@ class Database:
             return self.get_references_by_usr(usr)
         return []
 
+    def lsp_did_save_db(self, file_path, commands_map):
+        """处理文件保存时的增量更新逻辑，返回需要重新索引的文件列表及其编译命令"""
+        dependent_sources = self.get_sources_including(file_path)
+        
+        cmd_info = commands_map.get(file_path)
+        files_to_index = []
+
+        if cmd_info:
+            files_to_index.append((file_path, cmd_info))
+        
+        for dep_src in dependent_sources:
+            if dep_src == file_path:
+                continue
+            dep_cmd = commands_map.get(dep_src)
+            if dep_cmd and not any(f[0] == dep_src for f in files_to_index):
+                files_to_index.append((dep_src, dep_cmd))
+                
+        return files_to_index
+
     def lsp_code_action_db(self, file_path, line, col):
         """查支持的 Code Action 操作 (目前只看是不是宏)"""
         usr = self.get_usr_at_location(file_path, line, col)
         if usr and self.is_macro(usr):
             return "expand_macro"
         return None
+
+    def lsp_execute_command_db(self, command, args, commands_map):
+        """执行后台复杂指令，比如宏展开"""
+        if command == "pyclangd.expandMacro":
+            import os, shlex, tempfile, re, subprocess
+            from cindex import Index, CursorKind
+            uri, line_0, col_0 = args
+            file_path = os.path.normpath(uri.replace("file://", ""))
+            
+            cmd_info = commands_map.get(file_path)
+            if not cmd_info:
+                return {"error": f"Cannot expand macro: missing compile_commands mapping for {file_path}"}
+            
+            idx = Index.create()
+            raw_args = cmd_info.get('arguments', [])
+            if not raw_args:
+                command_str = cmd_info.get('command', '')
+                if command_str: raw_args = shlex.split(command_str)
+            
+            compiler_args = []
+            skip_next = False
+            for arg in raw_args[1:]:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if arg == '-o':
+                    skip_next = True
+                    continue
+                if arg in ('-c', '-S'): continue
+                if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')): continue
+                if arg == '-MF':
+                    skip_next = True
+                    continue
+                compiler_args.append(arg)
+            
+            compiler_args.append('-fsyntax-only')
+            compiler_args.extend([
+                '-ferror-limit=0', '-Wno-error', '-Wno-strict-prototypes',
+                '-Wno-implicit-int', '-Wno-unknown-warning-option',
+                '-Wno-unknown-attributes', '-Qunused-arguments'
+            ])
+            
+            directory = cmd_info.get('directory', '')
+            if directory:
+                compiler_args.extend(['-working-directory', directory])
+                
+            compiler_path = raw_args[0] if raw_args else ''
+            if 'aarch64' in compiler_path or 'arm64' in compiler_path:
+                compiler_args.append('--target=aarch64-linux-gnu')
+            elif 'arm' in compiler_path:
+                compiler_args.append('--target=arm-linux-gnueabihf')
+                
+            builtin_includes = '/home/lc/llvm22/lib/clang/22/include' 
+            compiler_args.extend(['-isystem', builtin_includes])
+
+            tu = idx.parse(file_path, args=compiler_args, options=0x01)
+            
+            target_node = None
+            line_1 = line_0 + 1
+            col_1 = col_0 + 1
+            for node in tu.cursor.walk_preorder():
+                if node.kind == CursorKind.MACRO_INSTANTIATION:
+                    loc = node.extent
+                    if loc.start.line == line_1 and loc.start.column <= col_1 <= loc.end.column:
+                        target_node = node
+                        break
+                        
+            if not target_node:
+                return {"error": f"Cannot find MACRO_INSTANTIATION at {line_1}:{col_1}"}
+                
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                
+            s_line = target_node.extent.start.line - 1
+            s_col = target_node.extent.start.column - 1
+            e_line = target_node.extent.end.line - 1
+            e_col = target_node.extent.end.column - 1
+            
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".c", dir=os.path.dirname(file_path))
+            os.close(tmp_fd)
+            
+            try:
+                mod_lines = lines.copy()
+                mod_lines[e_line] = mod_lines[e_line][:e_col] + "/*PYCLANGD_END*/" + mod_lines[e_line][e_col:]
+                mod_lines[s_line] = mod_lines[s_line][:s_col] + "/*PYCLANGD_START*/" + mod_lines[s_line][s_col:]
+                
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    f.writelines(mod_lines)
+                
+                clang_e_args = compiler_args.copy()
+                if '-fsyntax-only' in clang_e_args:
+                    clang_e_args.remove('-fsyntax-only')
+                
+                cmd = ["clang", "-E", "-C"] + clang_e_args + [tmp_path]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                output = result.stdout
+                
+                match = re.search(r'/\*PYCLANGD_START\*/(.*?)/\*PYCLANGD_END\*/', output, re.DOTALL)
+                if match:
+                    expanded_text = match.group(1).strip()
+                    return {
+                        "success": True,
+                        "text": expanded_text,
+                        "s_line": s_line,
+                        "s_col": s_col,
+                        "e_line": e_line,
+                        "e_col": e_col
+                    }
+                else:
+                    return {"error": "Failed to extract expanded text"}
+            except Exception as e:
+                return {"error": f"Subprocess error: {e}"}
+            finally:
+                os.remove(tmp_path)
+                
+        return {"error": "Unknown command"}
 
     def search_symbols(self, query):
         """模糊搜索符号（Ctrl+T）- 只搜定义"""
