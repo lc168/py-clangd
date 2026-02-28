@@ -11,14 +11,34 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 try:
     from pygls.server import LanguageServer
     from lsprotocol.types import (
-        TEXT_DOCUMENT_DEFINITION, TEXT_DOCUMENT_DOCUMENT_SYMBOL, WORKSPACE_SYMBOL,
-        TEXT_DOCUMENT_REFERENCES, TEXT_DOCUMENT_CODE_ACTION, WORKSPACE_EXECUTE_COMMAND,
-        Location, Range, Position, SymbolInformation, SymbolKind, DocumentSymbol, MessageType,
-        CodeAction, CodeActionKind, Command, CodeActionParams, ExecuteCommandParams,
-        WorkspaceEdit, TextEdit, TextDocumentEdit, OptionalVersionedTextDocumentIdentifier,
-        ApplyWorkspaceEditParams
+        # LSP Features & Commands
+        TEXT_DOCUMENT_CODE_ACTION,
+        TEXT_DOCUMENT_DEFINITION,
+        TEXT_DOCUMENT_DID_SAVE,
+        TEXT_DOCUMENT_DOCUMENT_SYMBOL,
+        TEXT_DOCUMENT_REFERENCES,
+        WORKSPACE_EXECUTE_COMMAND,
+        WORKSPACE_SYMBOL,
+
+        # LSP Types & Classes
+        ApplyWorkspaceEditParams,
+        CodeAction,
+        CodeActionKind,
+        CodeActionParams,
+        Command,
+        DocumentSymbol,
+        ExecuteCommandParams,
+        Location,
+        MessageType,
+        OptionalVersionedTextDocumentIdentifier,
+        Position,
+        Range,
+        SymbolInformation,
+        SymbolKind,
+        TextDocumentEdit,
+        TextEdit,
+        WorkspaceEdit,
     )
-    from lsprotocol.types import TEXT_DOCUMENT_DID_SAVE
 except ImportError as e:
     print(f"Error: 缺少基础库 {e}, 请执行 pip install pygls lsprotocol", file=sys.stderr)
     sys.exit(1)
