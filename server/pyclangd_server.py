@@ -58,6 +58,73 @@ logger = logging.getLogger("PyClangd")
 # # 单独把我们自己的 PyClangd 设置为 INFO 级别，这样只有我们的进度条会显示
 logger.setLevel(logging.INFO)
 
+# === 辅助函数：清洗编译参数 ===
+def _clean_compiler_args(raw_args, directory, source_file=None):
+    """清洗并组装传递给 libclang 的编译参数"""
+    compiler_args = []
+    skip_next = False
+    source_basename = os.path.basename(source_file) if source_file else ""
+
+    for arg in raw_args[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+            
+        # 1. 干掉输出指令 -o 及其后面的文件名
+        if arg == '-o':
+            skip_next = True
+            continue
+            
+        # 2. 干掉编译动作指令 -c 和 -S
+        if arg in ('-c', '-S'):
+            continue
+            
+        # 3. 干掉重复的源文件
+        if source_basename and os.path.basename(arg) == source_basename:
+            continue
+            
+        # 4. 干掉 Clang 不认识的 GCC 专属参数
+        if arg in ('-fconserve-stack', '-fno-var-tracking-assignments', '-fmerge-all-constants', '-fno-allow-store-data-races') or arg.startswith(('-mabi=', '-falign-kernels', '-mpreferred-stack-boundary=')):
+            continue
+
+        # 5. 干掉可能会导致 libclang 报错的参数：仅针对依赖生成与强制报错
+        if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')):
+            continue
+        if arg == '-MF':
+            skip_next = True
+            continue
+        if arg.startswith('-Werror='):
+            continue
+        
+        compiler_args.append(arg)
+
+    compiler_args.append('-fsyntax-only')
+    compiler_args.append('-ferror-limit=0')
+    
+    # 对付老旧内核代码的杀手锏
+    compiler_args.extend([
+        '-Wno-error',
+        '-Wno-strict-prototypes',
+        '-Wno-implicit-int',
+        '-Wno-unknown-warning-option',
+        '-Wno-unknown-attributes',
+        '-Qunused-arguments'
+    ])
+
+    if directory:
+        compiler_args.extend(['-working-directory', directory])
+
+    compiler_path = raw_args[0] if raw_args else ''
+    if 'aarch64' in compiler_path or 'arm64' in compiler_path:
+        compiler_args.append('--target=aarch64-linux-gnu')
+    elif 'arm' in compiler_path:
+        compiler_args.append('--target=arm-linux-gnueabihf')
+
+    builtin_includes = '/home/lc/llvm22/lib/clang/22/include' 
+    compiler_args.extend(['-isystem', builtin_includes])
+
+    return compiler_args
+
 # --- 独立 Worker 函数 (必须定义在顶层以支持序列化) ---
 def parse_to_sqlite(args):
     cmd_info, db_path = args
@@ -80,7 +147,7 @@ def parse_to_sqlite(args):
 
     idx = Index.create()
     
-    # 获取原始参数并进行清洗
+    # 获取原始参数
     raw_args = cmd_info.get('arguments')
     if not raw_args:
         # ⭐ 核心兼容：有些 compile_commands.json 使用 "command" 字符串而不是 "arguments" 列表
@@ -90,74 +157,8 @@ def parse_to_sqlite(args):
         else:
             raw_args = []
             
-    source_basename = os.path.basename(source_file)
-
-    compiler_args = []
-    skip_next = False  # ⭐ 必须要有这个状态位！
-
-    for arg in raw_args[1:]:
-        if skip_next:
-            skip_next = False
-            continue
-            
-        # 1. 彻底干掉输出指令 -o 及其后面的文件名
-        if arg == '-o':
-            skip_next = True
-            continue
-            
-        # 2. 干掉编译动作指令 -c 和 -S
-        if arg in ('-c', '-S'):
-            continue
-            
-        # 3. 干掉重复的源文件
-        if os.path.basename(arg) == source_basename:
-            continue
-            
-        # 4. 干掉 Clang 不认识的 GCC 专属参数
-        if arg in ('-fconserve-stack', '-fno-var-tracking-assignments', '-fmerge-all-constants', '-fno-allow-store-data-races') or arg.startswith(('-mabi=', '-falign-kernels', '-mpreferred-stack-boundary=')):
-            continue
-
-        # 5. 干掉可能会导致 libclang 报错的参数：仅针对依赖生成与强制报错
-        # 注意：不要 arg.startswith('-Wp,-MMD')，这太宽泛了，可能干掉 -Wp,-D_FORTIFY_SOURCE
-        if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')):
-            continue
-        if arg == '-MF':
-            skip_next = True
-            continue
-        if arg.startswith('-Werror='):
-            continue
-        
-        compiler_args.append(arg)
-
-    compiler_args.append('-fsyntax-only')
-    # ⭐ 新增：解除错误数量限制！哪怕有 1000 个不认识的 GCC 参数，也要把 AST 树给我建完！
-    compiler_args.append('-ferror-limit=0')
-
-    # === 【新增】：对付老旧内核代码的杀手锏 ===
-    compiler_args.append('-Wno-error')               # 绝不把警告升级为错误
-    compiler_args.append('-Wno-strict-prototypes')   # 忽略没有原型的函数报错
-    compiler_args.append('-Wno-implicit-int')        # 忽略老代码没写返回值类型的报错
-    compiler_args.append('-Wno-unknown-warning-option') # 让 Clang 忽略它不认识的警告 GCC 参数
-    compiler_args.append('-Wno-unknown-attributes')  # 忽略不知道的 attributes
-    compiler_args.append('-Qunused-arguments')       # 忽略未使用的参数
-
-    # === 【修复核心】：对付内核代码，必须注入 Working Directory ===
-    if directory:
-        compiler_args.append('-working-directory')
-        compiler_args.append(directory)
-
-    # ⭐ 新增：动态识别交叉编译架构 (从 raw_args[0] 也就是编译器名称中提取)
-    compiler_path = raw_args[0] if raw_args else ''
-    if 'aarch64' in compiler_path or 'arm64' in compiler_path:
-        compiler_args.append('--target=aarch64-linux-gnu')
-    elif 'arm' in compiler_path:
-        compiler_args.append('--target=arm-linux-gnueabihf')
-
-    # ⭐ 核心修复：强行注入 LLVM 22 的内置头文件路径
-    # 请把下面的路径替换成你用 ls 真实看到的路径
-    builtin_includes = '/home/lc/llvm22/lib/clang/22/include' 
-    compiler_args.append('-isystem')
-    compiler_args.append(builtin_includes)
+    # 使用新抽出的函数清洗并生成最终参数
+    compiler_args = _clean_compiler_args(raw_args, directory, source_file)
 
     mtime = 0
     try:
