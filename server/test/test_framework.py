@@ -89,18 +89,11 @@ def validate_definitions(db, def_tests_path):
             else:
                 col = 5
                 
-        # 1. Get USR at cursor
-        usr = db.get_usr_at_location(src_file, src_line, col)
+        # Directly call the high-level DB interface simulating an LSP request
+        defs = db.lsp_definition_db(src_file, src_line, col, line_content)
         
-        if not usr:
-            print(f"❌ FAIL [{label}]: Could not find USR at {t['source_file']}:{src_line}:{col}")
-            failed += 1
-            continue
-            
-        # 2. Get definitions
-        defs = db.get_definitions_by_usr(usr)
         if not defs:
-            print(f"❌ FAIL [{label}]: Found USR ({usr}) but no definition in DB.")
+            print(f"❌ FAIL [{label}]: Found no definition for token at {t['source_file']}:{src_line}:{col}")
             failed += 1
             continue
             
@@ -166,16 +159,13 @@ def validate_references(db, ref_tests_path):
             else:
                 col = 5
                 
-        # 1. Get USR
-        usr = db.get_usr_at_location(src_file, src_line, col)
-                
-        if not usr:
-            print(f"❌ FAIL [{label}]: Could not find USR at {t['source_file']}:{src_line}:{col}")
+        # Directly call the high-level DB interface
+        refs = db.lsp_references_db(src_file, src_line, col)
+        
+        if not refs:
+            print(f"❌ FAIL [{label}]: No references found at {t['source_file']}:{src_line}:{col}")
             failed += 1
             continue
-            
-        # 2. Get References
-        refs = db.get_references_by_usr(usr)
         
         actual_locations = set()
         for r in refs:

@@ -327,7 +327,7 @@ def lsp_did_save(server: PyClangdServer, params):
     # 获取这个文件被哪些源文件包含，或者它本身就是源文件
     dependent_sources = []
     if server.db:
-        dependent_sources = server.db.get_sources_including(file_path)
+        dependent_sources = server.db.lsp_did_save_db(file_path)
 
     cmd_info = server.commands_map.get(file_path)
     files_to_index = []
@@ -366,28 +366,29 @@ def lsp_did_save(server: PyClangdServer, params):
 def lsp_document_symbols(server: PyClangdServer, params):
     """大纲视图：从数据库秒级查询"""
     file_path = os.path.normpath(params.text_document.uri.replace("file://", ""))
-    results = server.db.get_symbols_by_file(file_path)
-    
     symbols = []
-    for name, kind_id, sl, sc, el, ec in results:
-        kind_map = {CursorKind.FUNCTION_DECL.value: SymbolKind.Function, 
-                    CursorKind.VAR_DECL.value: SymbolKind.Variable,
-                    CursorKind.MACRO_DEFINITION.value: SymbolKind.Constant}
-        kind = kind_map.get(kind_id, SymbolKind.Field)
-        
-        rng = Range(start=Position(line=sl-1, character=sc-1), end=Position(line=el-1, character=ec-1))
-        symbols.append(DocumentSymbol(name=name, kind=kind, range=rng, selection_range=rng, children=[]))
+    if server.db:
+        for name, kind_id, sl, sc, el, ec in server.db.lsp_document_symbols_db(file_path):
+            kind_map = {CursorKind.FUNCTION_DECL.value: SymbolKind.Function, 
+                        CursorKind.VAR_DECL.value: SymbolKind.Variable,
+                        CursorKind.MACRO_DEFINITION.value: SymbolKind.Constant}
+            kind = kind_map.get(kind_id, SymbolKind.Field)
+            
+            rng = Range(start=Position(line=sl-1, character=sc-1), end=Position(line=el-1, character=ec-1))
+            symbols.append(DocumentSymbol(name=name, kind=kind, range=rng, selection_range=rng, children=[]))
     return symbols
 
 @ls.feature(WORKSPACE_SYMBOL)
 def lsp_workspace_symbols(server: PyClangdServer, params):
     """全局符号搜索：Ctrl+T"""
-    results = server.db.search_symbols(params.query)
+    if not server.db:
+        return []
+    
     return [SymbolInformation(
         name=n, kind=SymbolKind.Function,
         location=Location(uri=f"file://{fp}", range=Range(start=Position(line=sl-1, character=sc-1), 
                                                           end=Position(line=sl-1, character=sc-1+len(n))))
-    ) for n, fp, sl, sc, usr in results]
+    ) for n, fp, sl, sc, usr in server.db.lsp_workspace_symbols_db(params.query)]
 
 
 import re
@@ -408,44 +409,27 @@ def lsp_definition(server: PyClangdServer, params):
     
     logger.info(f"👉 发起跳转: {file_path} 行{line_1} 列{col_1}")
     
+    if not server.db:
+        return None
+        
     try:
-        # --- 策略 0：检查是否是头文件字面量点击 ---
-        # 尝试读取光标所在行的文本
+        # 获取光标所在行文本
+        line_text = ""
         doc = server.workspace.get_text_document(uri)
         if doc and line_0 < len(doc.lines):
             line_text = doc.lines[line_0]
-            # 如果这一行看起来像 #include 语句
-            if "#include" in line_text:
-                # 提取尖括号或双引号内的路径
-                import re
-                match = re.search(r'#include\s*[<"]([^>"]+)[>"]', line_text)
-                if match:
-                    exact_path_clicked = match.group(1)
-                    inc_path = server.db.get_include_by_exact_path(file_path, exact_path_clicked)
-                    if inc_path and os.path.exists(inc_path):
-                        logger.info(f"   ↳ 🎯 触发头文件直接跳转: {exact_path_clicked} -> {inc_path}")
-                        return [Location(
-                            uri=f"file://{inc_path}",
-                            range=Range(
-                                start=Position(line=0, character=0),
-                                end=Position(line=0, character=0)
-                            )
-                        )]
-
-        # --- 策略 1：坐标精准匹配 (USR 级别) ---
-        usr = server.db.get_usr_at_location(file_path, line_1, col_1)
-        if usr:
-            logger.info(f"   ↳ 🎯 坐标命中了 USR: {usr} (line={line_1}, col={col_1})")
-            results = server.db.get_definitions_by_usr(usr)
-            if results:
-                logger.info(f"   ↳ ✅ USR 查找成功: 找到 {len(results)} 个定义")
-                return [Location(
-                    uri=f"file://{fp}",
-                    range=Range(
-                        start=Position(line=sl-1, character=sc-1),
-                        end=Position(line=el-1, character=ec-1)
-                    )
-                ) for fp, sl, sc, el, ec in results]
+            
+        results = server.db.lsp_definition_db(file_path, line_1, col_1, line_text)
+        
+        if results:
+            logger.info(f"   ↳ ✅ 查找成功: 找到 {len(results)} 个定义")
+            return [Location(
+                uri=f"file://{fp}",
+                range=Range(
+                    start=Position(line=sl-1, character=sc-1),
+                    end=Position(line=el-1, character=ec-1)
+                )
+            ) for fp, sl, sc, el, ec in results]
 
         logger.info("   ↳ ❌ 跳转失败: 坐标未命或未找到定义")
         return None
@@ -468,21 +452,20 @@ def lsp_references(server: PyClangdServer, params):
     
     logger.info(f"👉 查找引用: {file_path} 行{line_1} 列{col_1}")
     
+    if not server.db:
+        return []
+        
     try:
-        # --- 策略 1：坐标精准匹配 (USR 级别) ---
-        usr = server.db.get_usr_at_location(file_path, line_1, col_1)
-        if usr:
-            logger.info(f"   ↳ 🎯 坐标命中了 USR: {usr} (line={line_1}, col={col_1})")
-            results = server.db.get_references_by_usr(usr)
-            if results:
-                logger.info(f"   ↳ ✅ USR 引用查找成功: 找到 {len(results)} 处引用")
-                return [Location(
-                    uri=f"file://{fp}",
-                    range=Range(
-                        start=Position(line=sl-1, character=sc-1),
-                        end=Position(line=el-1, character=ec-1)
-                    )
-                ) for fp, sl, sc, el, ec in results]
+        results = server.db.lsp_references_db(file_path, line_1, col_1)
+        if results:
+            logger.info(f"   ↳ ✅ 引用查找成功: 找到 {len(results)} 处引用")
+            return [Location(
+                uri=f"file://{fp}",
+                range=Range(
+                    start=Position(line=sl-1, character=sc-1),
+                    end=Position(line=el-1, character=ec-1)
+                )
+            ) for fp, sl, sc, el, ec in results]
                 
         logger.info("   ↳ ❌ 查找引用失败: 未找到任何引用")
         # 返回空列表而不是 None 是查找引用的标准行为
@@ -505,8 +488,8 @@ def lsp_code_action(server: PyClangdServer, params: CodeActionParams):
     if not server.db:
         return None
         
-    usr = server.db.get_usr_at_location(file_path, line_1, col_1)
-    if usr and server.db.is_macro(usr):
+    action_type = server.db.lsp_code_action_db(file_path, line_1, col_1)
+    if action_type == "expand_macro":
         return [
             CodeAction(
                 title="🔬 完全展开宏 (py-clangd)",

@@ -165,6 +165,57 @@ class Database:
         res = self.cursor.fetchone()
         return res[0] if res else None
 
+    # --- 从底层拆解上来的高层查询逻辑 (对应 LSP 请求) ---
+    def lsp_did_save_db(self, file_path):
+        """处理增量更新的查询，返回它自己以及依赖它的目标"""
+        return self.get_sources_including(file_path)
+
+    def lsp_document_symbols_db(self, file_path):
+        self.cursor.execute('''
+            SELECT s.name, s.kind, r.s_line, r.s_col, r.e_line, r.e_col 
+            FROM refs r JOIN symbols s ON r.usr = s.usr
+            WHERE r.file_path = ? AND r.role = 'def' ORDER BY r.s_line ASC
+        ''', (file_path,))
+        return self.cursor.fetchall()
+
+    def lsp_workspace_symbols_db(self, query):
+        self.cursor.execute('''
+            SELECT s.name, r.file_path, r.s_line, r.s_col, s.usr 
+            FROM refs r JOIN symbols s ON r.usr = s.usr
+            WHERE s.name LIKE ? AND r.role = 'def' LIMIT 100
+        ''', (f"%{query}%",))
+        return self.cursor.fetchall()
+
+    def lsp_definition_db(self, file_path, line, col, line_text=""):
+        """查定义核心逻辑：优先头文件跳转，后查 USR 跳跃"""
+        import re, os
+        if "#include" in line_text:
+            match = re.search(r'#include\s*[<"]([^>"]+)[>"]', line_text)
+            if match:
+                exact_path_clicked = match.group(1)
+                inc_path = self.get_include_by_exact_path(file_path, exact_path_clicked)
+                if inc_path and os.path.exists(inc_path):
+                    return [(inc_path, 1, 1, 1, 1)]
+                
+        usr = self.get_usr_at_location(file_path, line, col)
+        if usr:
+            return self.get_definitions_by_usr(usr)
+        return []
+
+    def lsp_references_db(self, file_path, line, col):
+        """查引用核心逻辑"""
+        usr = self.get_usr_at_location(file_path, line, col)
+        if usr:
+            return self.get_references_by_usr(usr)
+        return []
+
+    def lsp_code_action_db(self, file_path, line, col):
+        """查支持的 Code Action 操作 (目前只看是不是宏)"""
+        usr = self.get_usr_at_location(file_path, line, col)
+        if usr and self.is_macro(usr):
+            return "expand_macro"
+        return None
+
     def search_symbols(self, query):
         """模糊搜索符号（Ctrl+T）- 只搜定义"""
         self.cursor.execute('''
@@ -206,9 +257,13 @@ class Database:
         # 匹配逻辑：s_line == line 且 s_col <= col <= e_col
         # ⭐ 优化：优先匹配 role != 'def' (引用处)，并按宽度升序排列 (最精准的优先)
         self.cursor.execute('''
-            SELECT usr FROM refs 
-            WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
-            ORDER BY (CASE WHEN role = 'def' THEN 1 ELSE 0 END), (e_col - s_col) ASC
+            SELECT r.usr FROM refs r
+            LEFT JOIN symbols s ON r.usr = s.usr
+            WHERE r.file_path = ? AND r.s_line = ? AND r.s_col <= ? AND r.e_col >= ?
+            ORDER BY 
+                (CASE WHEN s.kind = 'MACRO_DEFINITION' THEN 0 ELSE 1 END),
+                (CASE WHEN r.role = 'def' THEN 1 ELSE 0 END), 
+                (r.e_col - r.s_col) ASC
             LIMIT 1
         ''', (file_path, line, col, col))
         res = self.cursor.fetchone()
