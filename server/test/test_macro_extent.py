@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 import os
 import sys
 sys.path.append("/home/lc/sda/work/py-clangd/server")
@@ -20,6 +20,26 @@ with open("test_macro.c", "w") as f:
 idx = Index.create()
 tu = idx.parse("test_macro.c", options=0x01)
 
+# for node in tu.cursor.walk_preorder():
+#     print(dir(node))
+#     # print(
+#     #     f"{node.kind:<32}spelling[{node.spelling:<20}],"
+#     #     f"extent=({node.extent.start.line}:{node.extent.start.column} - {node.extent.end.line}:{node.extent.end.column})"
+#     # )
+#     break
+
+def print_cursor_details(node):
+    print(f"--- Details for Cursor: {node.spelling} ---")
+    for attr in dir(node):
+        if not attr.startswith('_'): # 忽略内置函数和私有变量
+            try:
+                value = getattr(node, attr)
+                # 如果是方法，我们可以选择不调用它（或者你可以过滤掉 callable）
+                if not callable(value):
+                   print(f"  {attr}: {value}")
+            except Exception as e:
+                print(f"  {attr}: <Error fetching: {e}>")
+
 for node in tu.cursor.walk_preorder():
-    if "MAX" in (node.spelling or ""):
-        print(f"Node: kind={node.kind}, spelling={node.spelling}, extent=({node.extent.start.line}:{node.extent.start.column} - {node.extent.end.line}:{node.extent.end.column})")
+    print_cursor_details(node)
+    #break
