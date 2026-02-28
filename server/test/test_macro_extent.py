@@ -94,6 +94,34 @@ def show_extent_location_data(node):
 
     return node.extent.start.file
 
+def show_extent_location_data1(node):
+    file_path = node.extent.start.file
+    start_offset = node.extent.start.offset
+    end_offset = node.extent.end.offset
+
+    len = end_offset - start_offset
+    print(f"START !!!----------------usr={node.get_usr()}--")
+    loc_file_name = node.location.file.name if node.location.file else "None"
+    start_file_name = node.extent.start.file.name if node.extent.start.file else "None"
+    end_file_name = node.extent.end.file.name if node.extent.end.file else "None"
+
+    print(
+        f"len={len}, spelling={node.spelling},"
+        f"kind={node.kind},"
+        f"location.file={loc_file_name},\n"
+        f"start.file={start_file_name},\n"
+        f"end.file={end_file_name}\n"
+    )
+
+    if node.location.file:
+        with open(node.location.file.name, 'r') as f:
+            print(f"file_extent={node.location.file.name}:{node.location.line}:{node.location.column}")
+            content = f.read()
+            print(content[node.location.offset:node.location.offset+len])
+    print("END ----------------")
+
+    return node.extent.start.file
+
 def print_cursor_details_v2(node):
     print(
         f"{node.kind.name:<32}"
@@ -102,5 +130,5 @@ def print_cursor_details_v2(node):
     )
 
 for node in tu.cursor.walk_preorder():
-    show_extent_location_data(node)
+    show_extent_location_data1(node)
     #break
