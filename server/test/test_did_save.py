@@ -22,7 +22,7 @@ class MockParams:
 class MockServer:
     def __init__(self, db_instance, c_file):
         self.db = db_instance
-        self.commands_map = {
+        self.db.commands_map = {
             os.path.realpath(c_file): {
                 "directory": os.path.dirname(c_file),
                 "file": os.path.basename(c_file),
@@ -39,7 +39,7 @@ def run_test():
         os.remove(db_path)
 
     # Initialize basic DB
-    db = Database(db_path, is_main=True)
+    db = Database(cases_dir)
     server = MockServer(db, c_file)
     
     print("="*60)

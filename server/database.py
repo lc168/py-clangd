@@ -4,6 +4,7 @@ import os
 import time
 import random
 import functools
+import clang_init
 
 def with_retry(base_delay=0.05):
     def decorator(func):
@@ -26,12 +27,13 @@ def with_retry(base_delay=0.05):
     return decorator
 
 class Database:
-    # 增加 is_main 参数，默认 False（工人模式）
-    def __init__(self, db_path, is_main=False):
-        self.db_path = db_path
+    def __init__(self, workspace_dir):
+        self.workspace_dir = os.path.abspath(workspace_dir)
+        self.db_path = os.path.join(self.workspace_dir, "pyclangd_index.db")
+        self.commands_map = {}
+        
         # 核心优化 1：isolation_level="IMMEDIATE" 
-        # 这会强制 Python 的 sqlite3 驱动在获取写锁时更聪明，彻底杜绝死锁假象！
-        self.conn = sqlite3.connect(db_path, timeout=60.0, check_same_thread=False, isolation_level="IMMEDIATE")
+        self.conn = sqlite3.connect(self.db_path, timeout=60.0, check_same_thread=False, isolation_level="IMMEDIATE")
         self.cursor = self.conn.cursor()
         
         # 核心优化 2：并发 SQLite 的性能地基
@@ -93,6 +95,26 @@ class Database:
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_included_file ON includes(included_file);')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_includes_exact ON includes(exact_path);')
         self.conn.commit()
+
+    def load_commands_map(self):
+        """加载 compile_commands.json, 返回 dict: { absolute_file_path -> dict }"""
+        cc_path = os.path.join(self.workspace_dir, "compile_commands.json")
+        commands_map = {}
+        if not os.path.exists(cc_path):
+            return commands_map
+            
+        import json
+        with open(cc_path, 'r', encoding='utf-8') as f:
+            commands = json.load(f)
+            
+        for cmd in commands:
+            directory = cmd.get('directory', '')
+            file_rel = cmd.get('file', '')
+            abs_path = os.path.realpath(os.path.join(directory, file_rel))
+            commands_map[abs_path] = cmd
+            
+        self.commands_map = commands_map
+        return commands_map
 
     # --- 增量更新的三大核心原子操作 ---
     @with_retry()
@@ -166,9 +188,6 @@ class Database:
         return res[0] if res else None
 
     # --- 从底层拆解上来的高层查询逻辑 (对应 LSP 请求) ---
-    def lsp_did_save_db(self, file_path):
-        """处理增量更新的查询，返回它自己以及依赖它的目标"""
-        return self.get_sources_including(file_path)
 
     def lsp_document_symbols_db(self, file_path):
         self.cursor.execute('''
@@ -434,6 +453,284 @@ class Database:
         self.cursor.execute('SELECT kind FROM symbols WHERE usr = ?', (usr,))
         res = self.cursor.fetchone()
         return res and res[0] == 'MACRO_DEFINITION'
+
+    # =========================================================================
+    # --- 构建索引与解析体系 (从原来的 pyclangd_server 中抽取) ---
+    # =========================================================================
+
+    @staticmethod
+    def _clean_compiler_args(raw_args, directory, source_file=None):
+        """清洗并组装传递给 libclang 的编译参数"""
+        import os
+        compiler_args = []
+        skip_next = False
+        source_basename = os.path.basename(source_file) if source_file else ""
+
+        for arg in raw_args[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+                
+            if arg == '-o':
+                skip_next = True
+                continue
+            if arg in ('-c', '-S'):
+                continue
+            if source_basename and os.path.basename(arg) == source_basename:
+                continue
+            if arg in ('-fconserve-stack', '-fno-var-tracking-assignments', '-fmerge-all-constants', '-fno-allow-store-data-races') or arg.startswith(('-mabi=', '-falign-kernels', '-mpreferred-stack-boundary=')):
+                continue
+            if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')):
+                continue
+            if arg == '-MF':
+                skip_next = True
+                continue
+            if arg.startswith('-Werror='):
+                continue
+            
+            compiler_args.append(arg)
+
+        compiler_args.append('-fsyntax-only')
+        compiler_args.append('-ferror-limit=0')
+        compiler_args.extend([
+            '-Wno-error', '-Wno-strict-prototypes', '-Wno-implicit-int',
+            '-Wno-unknown-warning-option', '-Wno-unknown-attributes', '-Qunused-arguments'
+        ])
+
+        if directory:
+            compiler_args.extend(['-working-directory', directory])
+
+        compiler_path = raw_args[0] if raw_args else ''
+        if 'aarch64' in compiler_path or 'arm64' in compiler_path:
+            compiler_args.append('--target=aarch64-linux-gnu')
+        elif 'arm' in compiler_path:
+            compiler_args.append('--target=arm-linux-gnueabihf')
+
+        builtin_includes = '/home/lc/llvm22/lib/clang/22/include' 
+        compiler_args.extend(['-isystem', builtin_includes])
+        return compiler_args
+
+    @staticmethod
+    def parse_to_sqlite(args):
+        """核心解析工人进程：为了支持多进程，必须为静态方法"""
+        import os, shlex, logging
+        from cindex import Index, CursorKind
+        
+        cmd_info, workspace_dir = args
+        logger = logging.getLogger("PyClangd")
+        
+        directory = cmd_info.get('directory', '')
+        file_rel = cmd_info.get('file', '')
+        source_file = os.path.realpath(os.path.join(directory, file_rel)) 
+        
+        if directory:
+            os.chdir(directory)
+        
+        if source_file.endswith(('.S', '.s')):
+            return "SKIP"
+
+        if not os.path.exists(source_file):
+            logger.warning(f"跳过不存在的文件: {source_file}")
+            return "FAILED"
+
+        idx = Index.create()
+        raw_args = cmd_info.get('arguments')
+        if not raw_args:
+            command_str = cmd_info.get('command', '')
+            if command_str: raw_args = shlex.split(command_str)
+            else: raw_args = []
+                
+        compiler_args = Database._clean_compiler_args(raw_args, directory, source_file)
+        # print(f"DEBUG_TEST_PARAMS: {source_file} -> {compiler_args}")
+
+        mtime = 0
+        try:
+            mtime = os.path.getmtime(source_file)
+            tu = idx.parse(source_file, args=compiler_args, options=0x01)
+            
+            included_files = []
+            for inc in tu.get_includes():
+                if inc.include and inc.include.name:
+                    inc_path = os.path.realpath(inc.include.name)
+                    included_files.append((inc_path, ""))
+
+            inc_path_to_exact = {}
+
+            for diag in tu.diagnostics:
+                if diag.severity >= 3:
+                    logger.warning(f"编译报错 [{source_file}]:args={compiler_args}")
+                    logger.warning(f"  ↳ {diag.spelling}")
+                    break
+        except Exception as e:
+            logger.error(f"libclang 解析崩溃 [{source_file}]: {e}")
+            return "FAILED"
+
+        symbols_to_upsert = []
+        refs_to_insert = []
+        
+        # 优化：路径缓存，大幅减少 os.path.realpath 调用
+        path_cache = {}
+        last_file_obj = None
+        last_node_file = None
+
+        # 提前定义好 kind 常量，加速循环
+        REF_KINDS = {
+            CursorKind.CALL_EXPR,
+            CursorKind.MEMBER_REF_EXPR,
+            CursorKind.DECL_REF_EXPR,
+            CursorKind.TYPE_REF,
+            CursorKind.OVERLOADED_DECL_REF,
+            CursorKind.MACRO_INSTANTIATION,
+            CursorKind.INCLUSION_DIRECTIVE
+        }
+        
+        DEF_KINDS = {
+            CursorKind.FUNCTION_DECL, CursorKind.CXX_METHOD,
+            CursorKind.STRUCT_DECL, CursorKind.CLASS_DECL,
+            CursorKind.VAR_DECL, CursorKind.FIELD_DECL,
+            CursorKind.TYPEDEF_DECL,
+            CursorKind.ENUM_DECL, CursorKind.ENUM_CONSTANT_DECL,
+            CursorKind.MACRO_DEFINITION
+        }
+
+        for node in tu.cursor.walk_preorder():
+            loc = node.location
+            file_obj = loc.file
+            if not file_obj: continue
+            
+            # --- 优化点 1：缓存文件路径解析 ---
+            if file_obj == last_file_obj:
+                node_file = last_node_file
+            else:
+                raw_name = file_obj.name
+                if raw_name in path_cache:
+                    node_file = path_cache[raw_name]
+                else:
+                    node_file = os.path.realpath(raw_name)
+                path_cache[raw_name] = node_file
+                last_file_obj = file_obj
+                last_node_file = node_file
+            
+            # --- 优化点 2：减少 node.kind 获取次数 ---
+            kind = node.kind
+            
+            # --- 角色 A: 定义 (def) ---
+            if kind in DEF_KINDS:
+                if kind == CursorKind.MACRO_DEFINITION or node.is_definition():
+                    usr = node.get_usr()
+                    if usr:
+                        name = node.spelling or ""
+                        symbols_to_upsert.append((usr, name, kind.name))
+                        s_line, s_col = loc.line, loc.column
+                        refs_to_insert.append((
+                            usr, None, node_file, 
+                            s_line, s_col, s_line, s_col + len(name), 'def'
+                        ))
+
+            # --- 角色 B: 引用与调用 (ref/call) ---
+            if kind in REF_KINDS:
+                if kind == CursorKind.INCLUSION_DIRECTIVE:
+                    exact_path = node.spelling
+                    if exact_path:
+                        inc_file = node.get_included_file()
+                        if inc_file and inc_file.name:
+                            inc_path = os.path.realpath(inc_file.name)
+                            inc_path_to_exact[inc_path] = exact_path
+                    continue
+                    
+                target = node.referenced
+                if target:
+                    usr = target.get_usr()
+                    if usr:
+                        parent = node.semantic_parent
+                        caller_usr = parent.get_usr() if (parent and parent.kind.is_declaration()) else None
+                        
+                        target_name = target.spelling or ""
+                        symbols_to_upsert.append((usr, target_name, target.kind.name))
+                        
+                        role = 'call' if kind == CursorKind.CALL_EXPR else 'ref'
+                        s_line, s_col = loc.line, loc.column
+                        # 使用 pinpoint 坐标
+                        name = node.spelling or target_name or ""
+                        refs_to_insert.append((
+                            usr, caller_usr, node_file,
+                            s_line, s_col, s_line, s_col + len(name), role
+                        ))
+
+        included_files = [(path, inc_path_to_exact.get(path, "")) for path, _ in included_files]
+
+        # 实例化专属进程的 DB 防止锁冲突
+        db = Database(workspace_dir)
+        db.save_parse_result(source_file, mtime, symbols_to_upsert, refs_to_insert, included_files)
+        db.close()
+        
+        return "SUCCESS"
+
+    def run_index_mode(self, jobs):
+        """主动索引模式（带增量更新与断点续传）"""
+        import os, json, multiprocessing, logging
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        
+        logger = logging.getLogger("PyClangd")
+        workspace_dir = self.workspace_dir
+        cc_path = os.path.join(workspace_dir, "compile_commands.json")
+        
+        if not os.path.exists(cc_path):
+            logger.error("未找到 compile_commands.json")
+            return
+
+        with open(cc_path, 'r', encoding='utf-8') as f:
+            commands = json.load(f)
+
+        max_workers = 1 if jobs <= 0 else jobs
+
+        self.cursor.execute('SELECT file_path, mtime FROM files WHERE status = "completed"')
+        indexed_files = {row[0]: row[1] for row in self.cursor.fetchall()}
+
+        tasks = []
+        for cmd in commands:
+            directory = cmd.get('directory', '')
+            file_rel = cmd.get('file', '')
+            abs_path = os.path.realpath(os.path.join(directory, file_rel))
+
+            if not os.path.exists(abs_path):
+                continue
+                
+            mtime = os.path.getmtime(abs_path)
+            if abs_path in indexed_files and indexed_files[abs_path] >= mtime:
+                continue
+                
+            tasks.append((cmd, workspace_dir))
+            # 标记为 indexing 中状态
+            self.update_file_status(abs_path, mtime, 'indexing', commit=False)
+
+        self.conn.commit()
+
+        total = len(tasks)
+        if total == 0:
+            logger.info("🎉 所有文件均已是最新状态，无需合并解析！")
+            return
+
+        logger.info(f"🚀 开始索引: 共 {len(commands)} 个文件，增量需要处理 {total} 个, 进程数: {max_workers}")
+
+        completed = 0
+        from time import time
+        start_time = time()
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_to_file = {executor.submit(Database.parse_to_sqlite, task): task for task in tasks}
+            for future in as_completed(future_to_file):
+                task = future_to_file[future]
+                completed += 1
+                
+                try:
+                    res = future.result()
+                except Exception as e:
+                    logger.error(f"处理奔溃111 {task[0].get('file')}: {e}")
+
+                elapsed = time() - start_time
+                progress = (completed / total) * 100
+                logger.info(f"进度: [{completed}/{total}] {progress:.1f}% | 耗时: {elapsed:.2f}s")
 
     def close(self):
         self.conn.close()

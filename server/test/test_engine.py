@@ -8,7 +8,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
 sys.path.append(parent_dir)
 
-from pyclangd_server import PyClangdServer, lsp_definition, lsp_references, parse_to_sqlite
+from pyclangd_server import PyClangdServer, lsp_definition, lsp_references
+import clang_init
 from database import Database
 
 # --- Mock Classes for LSP ---
@@ -25,6 +26,18 @@ class MockParams:
     def __init__(self, uri, line, character):
         self.text_document = MockTextDocument(uri)
         self.position = MockPosition(line, character)
+
+class MockDocumentData:
+    def __init__(self, filepath):
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            self.lines = f.readlines()
+
+class MockWorkspace:
+    def get_text_document(self, uri):
+        filepath = uri.replace("file://", "")
+        if os.path.exists(filepath):
+            return MockDocumentData(filepath)
+        return None
 
 # --- Marker Discovery Logic ---
 def discover_tests(cases_dir):
@@ -138,26 +151,27 @@ def discover_tests(cases_dir):
             
     return test_tasks
 
-def direct_build_db(cases_dir, db_path, files):
+def direct_build_db(workspace_dir, files):
     print(f"🔨 [1/2] 正在构建索引库 (共 {len(files)} 个文件)...")
     
+    db_path = os.path.join(workspace_dir, "pyclangd_index.db")
     if os.path.exists(db_path):
         os.remove(db_path)
 
-    db = Database(db_path, is_main=True)
+    db = Database(workspace_dir)
     
     for f_rel in files:
-        filepath = os.path.join(cases_dir, f_rel)
+        filepath = os.path.join(workspace_dir, f_rel)
         mock_cmd_info = {
-            "directory": cases_dir,
+            "directory": workspace_dir,
             "file": f_rel,
-            "arguments": ["clang", "-xc", "-I" + cases_dir, filepath]
+            "arguments": ["clang", "--target=aarch64-linux-gnu", "-xc", "-DBUILDING_PYCLANGD_TEST", "-I" + workspace_dir, filepath]
         }
         if f_rel.endswith('.cpp'):
-            mock_cmd_info["arguments"] = ["clang++", "-xc++", "-std=c++17", "-I" + cases_dir, filepath]
+            mock_cmd_info["arguments"] = ["clang++", "--target=aarch64-linux-gnu", "-xc++", "-std=c++17", "-DBUILDING_PYCLANGD_TEST", "-I" + workspace_dir, filepath]
             
         # ⭐ 使用独立函数解析文件，并直接存入对应数据库
-        status = parse_to_sqlite((mock_cmd_info, db_path))
+        status = Database.parse_to_sqlite((mock_cmd_info, workspace_dir))
     
     db.close()
 
@@ -186,15 +200,16 @@ def run_tests():
                 all_files.add(ef)
 
     # 1. 建库
-    direct_build_db(cases_dir, db_path, list(all_files))
+    direct_build_db(cases_dir, list(all_files))
 
     print(f"\n🚀 [2/2] 启动探测引擎 (共 {len(tasks)} 个测试点)...")
     
     class MockServer:
         def __init__(self, db_instance):
             self.db = db_instance
+            self.workspace = MockWorkspace()
             
-    server = MockServer(Database(db_path, is_main=False))
+    server = MockServer(Database(cases_dir, is_main=False))
 
     score = 0
     total_cases = len(tasks)

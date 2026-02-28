@@ -5,12 +5,13 @@ import json
 import subprocess
 import shutil
 
+
 # Add server directory to path to import modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
 sys.path.append(parent_dir)
 
-from pyclangd_server import run_index_mode, parse_to_sqlite
+from database import Database
 from database import Database
 
 def run_bear_make(cases_dir):
@@ -200,14 +201,17 @@ def main():
         
     # 3. Index everything via the real server logic
     print("\n⚡ Running parallel indexing...")
-    run_index_mode(cases_dir, jobs=0)
-    
+    db = Database(cases_dir)
+    print("load_commands_map......................")
+    db.load_commands_map()
+    print("run_index_mode.....................")
+    db.run_index_mode(jobs=0)
+    print("if not os.path.exists(db_path):.....................")
     if not os.path.exists(db_path):
         print("❌ Index database was not created!")
         return
         
     # 4. Validate
-    db = Database(db_path, is_main=True)
     
     def_pass, def_fail = validate_definitions(db, os.path.join(current_dir, "def_tests.json"))
     ref_pass, ref_fail = validate_references(db, os.path.join(current_dir, "ref_tests.json"))
