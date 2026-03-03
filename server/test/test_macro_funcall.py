@@ -2,7 +2,7 @@
 import os
 import sys
 # 保持你的路径添加不变
-sys.path.append("/home/lc/py-clangd/server")
+sys.path.append("../")
 import clang_init
 from cindex import Index, CursorKind, TranslationUnit
 
@@ -95,7 +95,7 @@ def show1(node, depth=0):
 # 确保使用正确的 Flag
 # PARSE_DETAILED_PROCESSING_RECORD = 1
 idx = Index.create()
-tu = idx.parse("test_funcall.c", options=TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
+tu = idx.parse("test_macro_funcall.c", options=TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
 
 # 解析完成后检查诊断信息
 for diag in tu.diagnostics:
