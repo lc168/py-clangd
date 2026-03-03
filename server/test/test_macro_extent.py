@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
-sys.path.append("/home/lc/sda/work/py-clangd/server")
+sys.path.append("/home/lc/py-clangd/server")
 import clang_init
 from cindex import Index, CursorKind
 
