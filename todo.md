@@ -14,7 +14,7 @@
  # 结构体成员的跳转？？
 
       with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            future_to_file = {executor.submit(Database.parse_to_sqlite, task): task for task in tasks}
+            future_to_file = {executor.submit(Database.index_worker, task): task for task in tasks}
             for future in as_completed(future_to_file):
                 task = future_to_file[future]
                 completed += 1

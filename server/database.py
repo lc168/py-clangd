@@ -4,7 +4,11 @@ import os
 import time
 import random
 import functools
+import logging
 import clang_init
+
+logger = logging.getLogger("PyClangd")
+logger.setLevel(logging.INFO)
 
 def with_retry(base_delay=0.05):
     def decorator(func):
@@ -511,43 +515,33 @@ class Database:
         return compiler_args
 
     @staticmethod
-    def parse_to_sqlite(args):
+    def index_worker(args):
         """核心解析工人进程：为了支持多进程，必须为静态方法"""
-        import os, shlex, logging
+        import os, shlex
         from cindex import Index, CursorKind
         
         cmd_info, workspace_dir = args
-        logger = logging.getLogger("PyClangd")
         
         directory = cmd_info.get('directory', '')
         file_rel = cmd_info.get('file', '')
         source_file = os.path.realpath(os.path.join(directory, file_rel)) 
         
-        if directory:
-            os.chdir(directory)
-        
-        if source_file.endswith(('.S', '.s')):
-            return "SKIP"
-
-        if not os.path.exists(source_file):
-            logger.warning(f"跳过不存在的文件: {source_file}")
-            return "FAILED"
-
-        idx = Index.create()
         raw_args = cmd_info.get('arguments')
         if not raw_args:
             command_str = cmd_info.get('command', '')
             if command_str: raw_args = shlex.split(command_str)
             else: raw_args = []
-                
+
         compiler_args = Database._clean_compiler_args(raw_args, directory, source_file)
         # print(f"DEBUG_TEST_PARAMS: {source_file} -> {compiler_args}")
 
+        idx = Index.create()
         mtime = 0
         try:
             mtime = os.path.getmtime(source_file)
             tu = idx.parse(source_file, args=compiler_args, options=0x01)
             
+            # 获取头文件路径，记录下来，最终要存入数据库
             included_files = []
             for inc in tu.get_includes():
                 if inc.include and inc.include.name:
@@ -668,10 +662,9 @@ class Database:
 
     def run_index_mode(self, jobs):
         """主动索引模式（带增量更新与断点续传）"""
-        import os, json, multiprocessing, logging
+        import os, json, multiprocessing
         from concurrent.futures import ProcessPoolExecutor, as_completed
         
-        logger = logging.getLogger("PyClangd")
         workspace_dir = self.workspace_dir
         cc_path = os.path.join(workspace_dir, "compile_commands.json")
         
@@ -718,7 +711,7 @@ class Database:
         start_time = time()
         
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            future_to_file = {executor.submit(Database.parse_to_sqlite, task): task for task in tasks}
+            future_to_file = {executor.submit(Database.index_worker, task): task for task in tasks}
             for future in as_completed(future_to_file):
                 task = future_to_file[future]
                 completed += 1
@@ -726,7 +719,7 @@ class Database:
                 try:
                     res = future.result()
                 except Exception as e:
-                    logger.error(f"处理奔溃111 {task[0].get('file')}: {e}")
+                    logger.error(f"处理失败 {task[0].get('file')}: {e}")
 
                 elapsed = time() - start_time
                 progress = (completed / total) * 100

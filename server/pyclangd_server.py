@@ -89,7 +89,7 @@ def lsp_did_save(server: PyClangdServer, params):
     def reindex_task():
         for src, cmd in files_to_index:
             # logger.info(f"[开始解析] {src}")
-            status = server.db.parse_to_sqlite((cmd, server.db.workspace_dir))
+            status = server.db.index_worker((cmd, server.db.workspace_dir))
             if status == "SUCCESS":
                 logger.info(f"✅ 更新成功: {os.path.basename(src)}")
             else:

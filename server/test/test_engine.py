@@ -171,7 +171,7 @@ def direct_build_db(workspace_dir, files):
             mock_cmd_info["arguments"] = ["clang++", "--target=aarch64-linux-gnu", "-xc++", "-std=c++17", "-DBUILDING_PYCLANGD_TEST", "-I" + workspace_dir, filepath]
             
         # ⭐ 使用独立函数解析文件，并直接存入对应数据库
-        status = Database.parse_to_sqlite((mock_cmd_info, workspace_dir))
+        status = Database.index_worker((mock_cmd_info, workspace_dir))
     
     db.close()
 

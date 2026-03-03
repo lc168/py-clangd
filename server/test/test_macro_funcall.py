@@ -9,13 +9,11 @@ from cindex import Index, CursorKind, TranslationUnit
 def extract_symbols_and_refs(node, kong=""):
         definitions = []
         references = set() # 用 set 去重
-             
-
         if not node.location.file:
             return definitions, list(references)
         
         kind = node.kind
-        
+
         # ==========================================
         # 🎯 提取定义 (Definitions)
         # ==========================================
