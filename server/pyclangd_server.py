@@ -133,7 +133,10 @@ import re
 def lsp_definition(server: PyClangdServer, params):
     """跳转到定义：执行坐标精准匹配 (USR 级)"""
     uri = params.text_document.uri
-    file_path = os.path.normpath(uri.replace("file://", ""))
+    # 关键：将从客户端获取到的可能带有软链接的路径，转换为底层的真实绝对路径！
+    # 这样才能保证去数据库查 `file_path` 时，能和 [index_worker](cci:1://file:///home/lc/py-clangd/server/database.py:515:4-651:24) 写入时的真实路径严丝合缝对上。
+    file_path = os.path.realpath(uri.replace("file://", ""))
+
     # LSP Position 是 0-indexed
     line_0 = params.position.line
     col_0 = params.position.character
@@ -146,16 +149,8 @@ def lsp_definition(server: PyClangdServer, params):
     
     if not server.db:
         return None
-        
     try:
-        # 获取光标所在行文本
-        line_text = ""
-        doc = server.workspace.get_text_document(uri)
-        if doc and line_0 < len(doc.lines):
-            line_text = doc.lines[line_0]
-            
-        results = server.db.lsp_definition_db(file_path, line_1, col_1, line_text)
-        
+        results = server.db.lsp_definition_db(file_path, line_1, col_1)
         if results:
             logger.info(f"   ↳ ✅ 查找成功: 找到 {len(results)} 个定义")
             return [Location(

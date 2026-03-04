@@ -71,13 +71,14 @@ gdepth = 0; #全局 depth 变量，记录当前遍历的深度
 def show1(node, depth=0):
     global gFunction, gdepth
 
-    # kong = ">" * depth
+    kong = ">" * depth
     # file = node.location.file if node.location else "None"
     # ref_usr = node.referenced.get_usr() if node.referenced else "None"
     # usr = node.get_usr() if node else "None"
     #    #打印一下准备存入数据库的数据
     # print(f"ref_usr:[{ref_usr}]usr:[{usr}] 2|spelling:[{node.spelling}] 3|kind:[{node.kind}] 4|{file}:{node.location.line}:{node.location.column} 5|depth=[{depth}]")
-    #extract_symbols_and_refs(node, kong)
+    extract_symbols_and_refs(node, kong)
+
     if node.kind == CursorKind.FUNCTION_DECL:
         gFunction = node.get_usr()
         gdepth = depth

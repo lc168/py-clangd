@@ -51,27 +51,25 @@ class Database:
 
     @with_retry()
     def _setup(self):
-        # 表 A：全局符号字典 (极致瘦身，只存 USR、名字、类型)
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS symbols (
-                usr TEXT PRIMARY KEY,
-                name TEXT,
-                kind TEXT
-            )''')
+        # # 表 A：全局符号字典 (极致瘦身，只存 USR、名字、类型)
+        # self.cursor.execute('''
+        #     CREATE TABLE IF NOT EXISTS symbols (
+        #         usr TEXT PRIMARY KEY,
+        #         name TEXT,
+        #         kind TEXT
+        #     )''')
         
         # 表 B：位置与引用关系 (使用 UNIQUE 防爆发)
         self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS refs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                usr TEXT,
-                caller_usr TEXT,
-                file_path TEXT,
-                s_line INTEGER,
-                s_col INTEGER,
-                e_line INTEGER,
-                e_col INTEGER,
-                role TEXT,
-                UNIQUE(usr, role, file_path, s_line, s_col)
+            CREATE TABLE IF NOT EXISTS symbols (
+                file_path TEXT,  -- 文件路径
+                s_line INTEGER,  -- 开始行
+                s_col INTEGER,  -- 开始列
+                e_line INTEGER,  -- 结束行
+                e_col INTEGER,  -- 结束列
+                usr TEXT,  -- 如果是 inc，usr为头文件路径，如果是 def，usr为符号的USR
+                role TEXT,  -- 角色, 例如: "inc", "def", "ref"
+                UNIQUE(file_path, s_line, s_col, e_line, e_col, usr)
             )''')
         
         # 表 C：增量与状态追踪
@@ -91,13 +89,13 @@ class Database:
                 UNIQUE(source_file, included_file)
             )''')
         
-        # 建立高频查询索引
-        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_sym_name ON symbols(name);')
-        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_ref_usr ON refs(usr);')
-        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_ref_caller ON refs(caller_usr);')
-        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_ref_file_role ON refs(file_path, role);')
-        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_included_file ON includes(included_file);')
-        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_includes_exact ON includes(exact_path);')
+        # # 建立高频查询索引
+        # self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_sym_name ON symbols(name);')
+        # self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_ref_usr ON refs(usr);')
+        # self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_ref_caller ON refs(caller_usr);')
+        # self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_ref_file_role ON refs(file_path, role);')
+        # self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_included_file ON includes(included_file);')
+        # self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_includes_exact ON includes(exact_path);')
         self.conn.commit()
 
     def load_commands_map(self):
@@ -150,29 +148,18 @@ class Database:
         self.conn.commit()
 
     @with_retry()
-    def save_parse_result(self, file_path, mtime, symbols, refs, included_files=None, commit=True):
+    def save_parse_result(self, file_path, mtime, symbols):
         """【性能核心】：单次事务完成状态更新、清理与写入"""
         # 1. 更新状态与清理
         self.cursor.execute('INSERT OR REPLACE INTO files VALUES (?, ?, ?)', (file_path, mtime, 'completed'))
         #删除掉file_path对应的所有记录
-        self.cursor.execute('DELETE FROM refs WHERE file_path = ?', (file_path,))
-        self.cursor.execute('DELETE FROM includes WHERE source_file = ?', (file_path,))
+        self.cursor.execute('DELETE FROM symbols WHERE file_path = ?', (file_path,))
 
         # 2. 写入数据
         if symbols:
-            self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?)', symbols)
-        if refs:
-            self.cursor.executemany('''
-                INSERT OR IGNORE INTO refs (usr, caller_usr, file_path, s_line, s_col, e_line, e_col, role) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', refs)
-        if included_files:
-            # included_files: [(absolute_path, exact_path_string), ...]
-            includes_data = [(file_path, inc_file, exact) for inc_file, exact in included_files]
-            self.cursor.executemany('INSERT OR IGNORE INTO includes VALUES (?, ?, ?)', includes_data)
-            
-        if commit:
-            self.conn.commit()
+            self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?)', symbols)
+        # 3. 落盘
+        self.conn.commit()
 
     # --- LSP 查询接口 (全部升级为 JOIN 联表查询) ---
     def get_sources_including(self, included_file):
@@ -192,7 +179,6 @@ class Database:
         return res[0] if res else None
 
     # --- 从底层拆解上来的高层查询逻辑 (对应 LSP 请求) ---
-
     def lsp_document_symbols_db(self, file_path):
         self.cursor.execute('''
             SELECT s.name, s.kind, r.s_line, r.s_col, r.e_line, r.e_col 
@@ -209,21 +195,36 @@ class Database:
         ''', (f"%{query}%",))
         return self.cursor.fetchall()
 
-    def lsp_definition_db(self, file_path, line, col, line_text=""):
-        """查定义核心逻辑：优先头文件跳转，后查 USR 跳跃"""
-        import re, os
-        if "#include" in line_text:
-            match = re.search(r'#include\s*[<"]([^>"]+)[>"]', line_text)
-            if match:
-                exact_path_clicked = match.group(1)
-                inc_path = self.get_include_by_exact_path(file_path, exact_path_clicked)
-                if inc_path and os.path.exists(inc_path):
-                    return [(inc_path, 1, 1, 1, 1)]
+    def lsp_definition_db(self, file_path, line, col):
+        """查定义核心逻辑：优先头文件跳转，后查 USR 跳跃（适配 Symbols 单表融合版架构）"""
+        self.cursor.execute('''
+            SELECT role, usr FROM symbols 
+            WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
+            ORDER BY (e_col - s_col) ASC LIMIT 1
+        ''', (file_path, line, col, col))
+        res = self.cursor.fetchone()
+        if not res:
+            return []
+        role, target_str = res
+        if role == 'inc':
+            # 头文件路径直接就存在了 target_str 中
+            import os
+            if os.path.exists(target_str):
+                return [(target_str, 1, 1, 1, 1)]
+            return []
                 
-        usr = self.get_usr_at_location(file_path, line, col)
-        if usr:
-            return self.get_definitions_by_usr(usr)
+        elif role in ('ref', 'def'):
+            # 无论是引用处按 F12，还是定义处自己按 F12，统统拿着 USR 去找它的 def 记录
+            self.cursor.execute('''
+                SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
+                FROM symbols 
+                WHERE usr = ? AND role = 'def'
+            ''', (target_str,))
+            return self.cursor.fetchall()
+
         return []
+
+
 
     def lsp_references_db(self, file_path, line, col):
         """查引用核心逻辑"""
@@ -392,16 +393,7 @@ class Database:
         ''', (file_path,))
         return self.cursor.fetchall()
     
-    # def get_definitions_by_name(self, name):
-    #     """跳转定义 (F12)：查名字对应的所有定义位置"""
-    #     self.cursor.execute('''
-    #         SELECT r.file_path, r.s_line, r.s_col, r.e_line, r.e_col 
-    #         FROM refs r JOIN symbols s ON r.usr = s.usr
-    #         WHERE s.name = ? AND r.role = 'def'
-    #     ''', (name,))
-    #     return self.cursor.fetchall()
     def get_definitions_by_name(self, name):
-        """跳转定义 (F12)：查名字对应的所有定义位置"""
         self.cursor.execute('''
             -- ⭐ 【修改核心】：加上 DISTINCT，强制合并物理坐标完全相同的重复结果
             SELECT DISTINCT r.file_path, r.s_line, r.s_col, r.e_line, r.e_col 
@@ -533,22 +525,13 @@ class Database:
             else: raw_args = []
 
         compiler_args = Database._clean_compiler_args(raw_args, directory, source_file)
-        # print(f"DEBUG_TEST_PARAMS: {source_file} -> {compiler_args}")
 
         idx = Index.create()
         mtime = 0
         try:
+            # 获取文件最后修改时间
             mtime = os.path.getmtime(source_file)
             tu = idx.parse(source_file, args=compiler_args, options=0x01)
-            
-            # 获取头文件路径，记录下来，最终要存入数据库
-            included_files = []
-            for inc in tu.get_includes():
-                if inc.include and inc.include.name:
-                    inc_path = os.path.realpath(inc.include.name)
-                    included_files.append((inc_path, ""))
-
-            inc_path_to_exact = {}
 
             for diag in tu.diagnostics:
                 if diag.severity >= 3:
@@ -563,99 +546,77 @@ class Database:
         refs_to_insert = []
         
         # 优化：路径缓存，大幅减少 os.path.realpath 调用
-        path_cache = {}
-        last_file_obj = None
-        last_node_file = None
+        last_raw_file_name = None
+        last_realpath_file_name = None
 
-        # 提前定义好 kind 常量，加速循环
-        REF_KINDS = {
-            CursorKind.CALL_EXPR,
-            CursorKind.MEMBER_REF_EXPR,
-            CursorKind.DECL_REF_EXPR,
-            CursorKind.TYPE_REF,
-            CursorKind.OVERLOADED_DECL_REF,
-            CursorKind.MACRO_INSTANTIATION,
-            CursorKind.INCLUSION_DIRECTIVE
-        }
-        
-        DEF_KINDS = {
-            CursorKind.FUNCTION_DECL, CursorKind.CXX_METHOD,
-            CursorKind.STRUCT_DECL, CursorKind.CLASS_DECL,
-            CursorKind.VAR_DECL, CursorKind.FIELD_DECL,
-            CursorKind.TYPEDEF_DECL,
-            CursorKind.ENUM_DECL, CursorKind.ENUM_CONSTANT_DECL,
-            CursorKind.MACRO_DEFINITION
-        }
-
+        # 遍历 AST 节点
         for node in tu.cursor.walk_preorder():
-            loc = node.location
-            file_obj = loc.file
-            if not file_obj: continue
+
+            if not node.location.file:
+                continue  #跳过没有文件的节点
+
+            raw_file_name = node.location.file.name
+            s_line = node.extent.start.line
+            s_col = node.extent.start.column
+            e_line = node.extent.end.line
+            e_col = node.extent.end.column
             
-            # --- 优化点 1：缓存文件路径解析 ---
-            if file_obj == last_file_obj:
-                node_file = last_node_file
+            # --- 优化点 1：缓存文件路径解析 ---尽量减少高耗时的os.path.realpath调用
+            if raw_file_name == last_raw_file_name:
+                realpath_file_name = last_realpath_file_name
             else:
-                raw_name = file_obj.name
-                if raw_name in path_cache:
-                    node_file = path_cache[raw_name]
-                else:
-                    node_file = os.path.realpath(raw_name)
-                path_cache[raw_name] = node_file
-                last_file_obj = file_obj
-                last_node_file = node_file
+                realpath_file_name = os.path.realpath(raw_file_name)
+                last_raw_file_name = raw_file_name
+                last_realpath_file_name = realpath_file_name
             
             # --- 优化点 2：减少 node.kind 获取次数 ---
             kind = node.kind
             
-            # --- 角色 A: 定义 (def) ---
-            if kind in DEF_KINDS:
-                if kind == CursorKind.MACRO_DEFINITION or node.is_definition():
-                    usr = node.get_usr()
-                    if usr:
-                        name = node.spelling or ""
-                        symbols_to_upsert.append((usr, name, kind.name))
-                        s_line, s_col = loc.line, loc.column
-                        refs_to_insert.append((
-                            usr, None, node_file, 
-                            s_line, s_col, s_line, s_col + len(name), 'def'
-                        ))
+            # --- 角色 A: 提取定义 (Definitions) ---
+            if (kind.is_declaration() and node.is_definition()) or kind == CursorKind.MACRO_DEFINITION:
+                usr = node.get_usr()
+                if usr:
+                    name = node.spelling or ""
+                    symbols_to_upsert.append((realpath_file_name, 
+                                             s_line, s_col, e_line, e_col,
+                                             usr, "def"))
 
-            # --- 角色 B: 引用与调用 (ref/call) ---
-            if kind in REF_KINDS:
-                if kind == CursorKind.INCLUSION_DIRECTIVE:
-                    exact_path = node.spelling
-                    if exact_path:
-                        inc_file = node.get_included_file()
-                        if inc_file and inc_file.name:
-                            inc_path = os.path.realpath(inc_file.name)
-                            inc_path_to_exact[inc_path] = exact_path
-                    continue
-                    
-                target = node.referenced
-                if target:
-                    usr = target.get_usr()
-                    if usr:
-                        parent = node.semantic_parent
-                        caller_usr = parent.get_usr() if (parent and parent.kind.is_declaration()) else None
-                        
-                        target_name = target.spelling or ""
-                        symbols_to_upsert.append((usr, target_name, target.kind.name))
-                        
-                        role = 'call' if kind == CursorKind.CALL_EXPR else 'ref'
-                        s_line, s_col = loc.line, loc.column
-                        # 使用 pinpoint 坐标
-                        name = node.spelling or target_name or ""
-                        refs_to_insert.append((
-                            usr, caller_usr, node_file,
-                            s_line, s_col, s_line, s_col + len(name), role
-                        ))
+            # --- 提取 include 引用 ---
+            if kind == CursorKind.INCLUSION_DIRECTIVE:
+                exact_path = node.spelling
+                if exact_path:
+                    inc_file = node.get_included_file()
+                    if inc_file and inc_file.name:
+                        inc_path = os.path.realpath(inc_file.name)
+                        symbols_to_upsert.append((realpath_file_name, 
+                                                 s_line, s_col, e_line, e_col,
+                                                 inc_path, "inc"))
+                continue
 
-        included_files = [(path, inc_path_to_exact.get(path, "")) for path, _ in included_files]
+            # --- 角色 B: 提取引用 (References) ---
+            is_ref_node = (
+                kind.is_reference() or 
+                kind in (
+                    CursorKind.DECL_REF_EXPR, 
+                    CursorKind.MEMBER_REF_EXPR, 
+                    CursorKind.MACRO_INSTANTIATION,
+                    CursorKind.CALL_EXPR
+                )
+            )
+
+            if is_ref_node:
+                callee = node.referenced
+                if callee and callee != node:
+                    usr = callee.get_usr()
+                    if usr:
+                        symbols_to_upsert.append((realpath_file_name, 
+                                                 s_line, s_col, e_line, e_col,
+                                                 usr, "ref"))
 
         # 实例化专属进程的 DB 防止锁冲突
         db = Database(workspace_dir)
-        db.save_parse_result(source_file, mtime, symbols_to_upsert, refs_to_insert, included_files)
+        # 保存解析结果到数据库
+        db.save_parse_result(source_file, mtime, symbols_to_upsert)
         db.close()
         
         return "SUCCESS"
@@ -710,16 +671,15 @@ class Database:
         from time import time
         start_time = time()
         
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            future_to_file = {executor.submit(Database.index_worker, task): task for task in tasks}
-            for future in as_completed(future_to_file):
-                task = future_to_file[future]
+        # ctrl + c 时能够自动安全退出
+        with multiprocessing.Pool(processes=max_workers) as pool:
+            # 使用 imap_unordered 可以极大地节省内存，它不会一次性把所有任务结果憋在内存里
+            # 而是像流水线一样，谁先完成就先吐出谁的结果
+            for res in pool.imap_unordered(Database.index_worker, tasks):
                 completed += 1
                 
-                try:
-                    res = future.result()
-                except Exception as e:
-                    logger.error(f"处理失败 {task[0].get('file')}: {e}")
+                if res == "FAILED":
+                    logger.error(f"某个文件处理失败，请查看上方详细日志")
 
                 elapsed = time() - start_time
                 progress = (completed / total) * 100
