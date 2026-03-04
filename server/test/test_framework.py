@@ -91,7 +91,7 @@ def validate_definitions(db, def_tests_path):
                 col = 5
                 
         # Directly call the high-level DB interface simulating an LSP request
-        defs = db.lsp_definition_db(src_file, src_line, col, line_content)
+        defs = db.lsp_definition_db(src_file, src_line, col)
         
         if not defs:
             print(f"❌ FAIL [{label}]: Found no definition for token at {t['source_file']}:{src_line}:{col}")

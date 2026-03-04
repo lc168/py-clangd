@@ -104,9 +104,14 @@ def lsp_document_symbols(server: PyClangdServer, params):
     symbols = []
     if server.db:
         for name, kind_id, sl, sc, el, ec in server.db.lsp_document_symbols_db(file_path):
-            kind_map = {CursorKind.FUNCTION_DECL.value: SymbolKind.Function, 
-                        CursorKind.VAR_DECL.value: SymbolKind.Variable,
-                        CursorKind.MACRO_DEFINITION.value: SymbolKind.Constant}
+            kind_map = {
+                "FUNCTION_DECL": SymbolKind.Function, 
+                "VAR_DECL": SymbolKind.Variable,
+                "MACRO_DEFINITION": SymbolKind.Constant,
+                "STRUCT_DECL": SymbolKind.Struct,
+                "FIELD_DECL": SymbolKind.Field,
+                "TYPEDEF_DECL": SymbolKind.Class
+            }
             kind = kind_map.get(kind_id, SymbolKind.Field)
             
             rng = Range(start=Position(line=sl-1, character=sc-1), end=Position(line=el-1, character=ec-1))

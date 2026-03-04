@@ -69,6 +69,8 @@ class Database:
                 e_col INTEGER,  -- 结束列
                 usr TEXT,  -- 如果是 inc，usr为头文件路径，如果是 def，usr为符号的USR
                 role TEXT,  -- 角色, 例如: "inc", "def", "ref"
+                name TEXT,  -- 符号或文件名字
+                kind TEXT,  -- 节点类型
                 UNIQUE(file_path, s_line, s_col, e_line, e_col, usr)
             )''')
         
@@ -129,22 +131,7 @@ class Database:
     @with_retry()
     def prepare_file_reindex(self, file_path):
         """增量第一步：抹除该文件旧的物理位置记录"""
-        self.cursor.execute('DELETE FROM refs WHERE file_path = ?', (file_path,))
-        self.cursor.execute('DELETE FROM includes WHERE source_file = ?', (file_path,))
-        self.conn.commit()
-
-    @with_retry()
-    def batch_insert_v2(self, symbols, refs):
-        """毫秒级批量写入：先更新字典，再插入引用拓扑"""
-        if symbols:
-            # 字典去重
-            self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?)', symbols)
-        if refs:
-            # 引用直接使用 IGNORE 插入，由于有了 UNIQUE 约束，重复的头文件引用将被直接屏蔽！
-            self.cursor.executemany('''
-                INSERT OR IGNORE INTO refs (usr, caller_usr, file_path, s_line, s_col, e_line, e_col, role) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', refs)
+        self.cursor.execute('DELETE FROM symbols WHERE file_path = ?', (file_path,))
         self.conn.commit()
 
     @with_retry()
@@ -157,41 +144,31 @@ class Database:
 
         # 2. 写入数据
         if symbols:
-            self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?)', symbols)
+            self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', symbols)
         # 3. 落盘
         self.conn.commit()
 
-    # --- LSP 查询接口 (全部升级为 JOIN 联表查询) ---
+    # --- LSP 查询接口 (全部升级为单表查询) ---
     def get_sources_including(self, included_file):
         """查询依赖了指定头文件的所有源文件"""
-        self.cursor.execute('SELECT source_file FROM includes WHERE included_file = ?', (included_file,))
+        self.cursor.execute('SELECT DISTINCT file_path FROM symbols WHERE role = "inc" AND usr = ?', (included_file,))
         return [row[0] for row in self.cursor.fetchall()]
-
-    def get_include_by_exact_path(self, source_file, exact_path):
-        """查找指定包含路径字面量对应的绝对路径，优先从当前所在文件查找"""
-        self.cursor.execute('SELECT included_file FROM includes WHERE source_file = ? AND exact_path = ? LIMIT 1', (source_file, exact_path))
-        res = self.cursor.fetchone()
-        if res:
-            return res[0]
-            
-        self.cursor.execute('SELECT included_file FROM includes WHERE exact_path = ? LIMIT 1', (exact_path,))
-        res = self.cursor.fetchone()
-        return res[0] if res else None
 
     # --- 从底层拆解上来的高层查询逻辑 (对应 LSP 请求) ---
     def lsp_document_symbols_db(self, file_path):
         self.cursor.execute('''
-            SELECT s.name, s.kind, r.s_line, r.s_col, r.e_line, r.e_col 
-            FROM refs r JOIN symbols s ON r.usr = s.usr
-            WHERE r.file_path = ? AND r.role = 'def' ORDER BY r.s_line ASC
+            SELECT name, kind, s_line, s_col, e_line, e_col 
+            FROM symbols
+            WHERE file_path = ? AND role = 'def' ORDER BY s_line ASC
         ''', (file_path,))
         return self.cursor.fetchall()
 
     def lsp_workspace_symbols_db(self, query):
+    # 全局搜索
         self.cursor.execute('''
-            SELECT s.name, r.file_path, r.s_line, r.s_col, s.usr 
-            FROM refs r JOIN symbols s ON r.usr = s.usr
-            WHERE s.name LIKE ? AND r.role = 'def' LIMIT 100
+            SELECT name, file_path, s_line, s_col, usr 
+            FROM symbols
+            WHERE name LIKE ? AND role = 'def' LIMIT 100
         ''', (f"%{query}%",))
         return self.cursor.fetchall()
 
@@ -200,8 +177,11 @@ class Database:
         self.cursor.execute('''
             SELECT role, usr FROM symbols 
             WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
-            ORDER BY (e_col - s_col) ASC LIMIT 1
-        ''', (file_path, line, col, col))
+            ORDER BY
+                (CASE WHEN kind = 'MACRO_DEFINITION' THEN 0 ELSE 1 END),
+                (CASE WHEN role = 'def' THEN 0 ELSE 1 END),
+                (e_col - s_col) ASC LIMIT 1''',
+                (file_path, line, col, col))
         res = self.cursor.fetchone()
         if not res:
             return []
@@ -375,45 +355,23 @@ class Database:
                 
         return {"error": "Unknown command"}
 
-    def search_symbols(self, query):
-        """模糊搜索符号（Ctrl+T）- 只搜定义"""
-        self.cursor.execute('''
-            SELECT s.name, r.file_path, r.s_line, r.s_col, s.usr 
-            FROM refs r JOIN symbols s ON r.usr = s.usr
-            WHERE s.name LIKE ? AND r.role = 'def' LIMIT 100
-        ''', (f"%{query}%",))
-        return self.cursor.fetchall()
 
-    def get_symbols_by_file(self, file_path):
-        """大纲视图：查本文件的所有定义"""
-        self.cursor.execute('''
-            SELECT s.name, s.kind, r.s_line, r.s_col, r.e_line, r.e_col 
-            FROM refs r JOIN symbols s ON r.usr = s.usr
-            WHERE r.file_path = ? AND r.role = 'def' ORDER BY r.s_line ASC
-        ''', (file_path,))
-        return self.cursor.fetchall()
+
+
     
-    def get_definitions_by_name(self, name):
-        self.cursor.execute('''
-            -- ⭐ 【修改核心】：加上 DISTINCT，强制合并物理坐标完全相同的重复结果
-            SELECT DISTINCT r.file_path, r.s_line, r.s_col, r.e_line, r.e_col 
-            FROM refs r JOIN symbols s ON r.usr = s.usr
-            WHERE s.name = ? AND r.role = 'def'
-        ''', (name,))
-        return self.cursor.fetchall()
+
 
     def get_usr_at_location(self, file_path, line, col):
         """核心：查询特定坐标下的符号 USR (精准跳转的基础)"""
         # 匹配逻辑：s_line == line 且 s_col <= col <= e_col
         # ⭐ 优化：优先匹配 role != 'def' (引用处)，并按宽度升序排列 (最精准的优先)
         self.cursor.execute('''
-            SELECT r.usr FROM refs r
-            LEFT JOIN symbols s ON r.usr = s.usr
-            WHERE r.file_path = ? AND r.s_line = ? AND r.s_col <= ? AND r.e_col >= ?
+            SELECT usr FROM symbols
+            WHERE file_path = ? AND s_line = ? AND s_col <= ? AND (s_line != e_line OR e_col >= ?) AND role != 'inc'
             ORDER BY 
-                (CASE WHEN s.kind = 'MACRO_DEFINITION' THEN 0 ELSE 1 END),
-                (CASE WHEN r.role = 'def' THEN 1 ELSE 0 END), 
-                (r.e_col - r.s_col) ASC
+                (CASE WHEN kind = 'MACRO_DEFINITION' THEN 0 ELSE 1 END),
+                (CASE WHEN role = 'def' THEN 1 ELSE 0 END), 
+                (e_col - s_col) ASC
             LIMIT 1
         ''', (file_path, line, col, col))
         res = self.cursor.fetchone()
@@ -423,7 +381,7 @@ class Database:
         """通过 USR 精确查找定义位置"""
         self.cursor.execute('''
             SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
-            FROM refs WHERE usr = ? AND role = 'def'
+            FROM symbols WHERE usr = ? AND role = 'def'
         ''', (usr,))
         return self.cursor.fetchall()
 
@@ -431,16 +389,16 @@ class Database:
         """查 USR 对应的所有引用位置（包含声明/定义、调用、读取等）"""
         self.cursor.execute('''
             SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
-            FROM refs WHERE usr = ? AND role IN ('ref', 'call', 'def')
+            FROM symbols WHERE usr = ? AND role IN ('ref', 'def')
         ''', (usr,))
         return self.cursor.fetchall()
 
     def get_references_by_name(self, name):
         """查名字对应的所有引用位置 (作为兜底)"""
         self.cursor.execute('''
-            SELECT DISTINCT r.file_path, r.s_line, r.s_col, r.e_line, r.e_col 
-            FROM refs r JOIN symbols s ON r.usr = s.usr
-            WHERE s.name = ? AND r.role IN ('ref', 'call', 'def')
+            SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
+            FROM symbols
+            WHERE name = ? AND role IN ('ref', 'def')
         ''', (name,))
         return self.cursor.fetchall()
 
@@ -579,7 +537,7 @@ class Database:
                     name = node.spelling or ""
                     symbols_to_upsert.append((realpath_file_name, 
                                              s_line, s_col, e_line, e_col,
-                                             usr, "def"))
+                                             usr, "def", name, kind.name))
 
             # --- 提取 include 引用 ---
             if kind == CursorKind.INCLUSION_DIRECTIVE:
@@ -588,9 +546,10 @@ class Database:
                     inc_file = node.get_included_file()
                     if inc_file and inc_file.name:
                         inc_path = os.path.realpath(inc_file.name)
+                        import os
                         symbols_to_upsert.append((realpath_file_name, 
                                                  s_line, s_col, e_line, e_col,
-                                                 inc_path, "inc"))
+                                                 inc_path, "inc", os.path.basename(inc_path), "INCLUSION_DIRECTIVE"))
                 continue
 
             # --- 角色 B: 提取引用 (References) ---
@@ -609,9 +568,11 @@ class Database:
                 if callee and callee != node:
                     usr = callee.get_usr()
                     if usr:
+                        target_name = callee.spelling or ""
+                        name = node.spelling or target_name or ""
                         symbols_to_upsert.append((realpath_file_name, 
                                                  s_line, s_col, e_line, e_col,
-                                                 usr, "ref"))
+                                                 usr, "ref", name, callee.kind.name))
 
         # 实例化专属进程的 DB 防止锁冲突
         db = Database(workspace_dir)
