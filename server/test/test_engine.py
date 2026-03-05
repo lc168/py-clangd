@@ -12,7 +12,10 @@ from pyclangd_server import PyClangdServer, lsp_definition, lsp_references
 import clang_init
 from database import Database
 
-# --- Mock Classes for LSP ---
+# --- Mock Classes for LSP (Language Server Protocol) ---
+# 这些类用于模拟 LSP 客户端（如 VSCode）发来的各种请求参数和数据结构。
+# 它们的意义在于：可以在没有真实编辑器环境的情况下，在命令行中直接调用并测试
+# PyClangdServer 的核心接口（如 lsp_definition、lsp_references）。
 class MockPosition:
     def __init__(self, line, character):
         self.line = line
@@ -95,7 +98,10 @@ def discover_tests(cases_dir):
                         ref_expects[label] = []
                     ref_expects[label].append((f_rel, line_idx))
                     
-    # 辅助函数：计算标记所在行的列索引
+    # 辅助函数：计算标记所在行的列索引 (column index)
+    # 作用：LSP 协议中发起代码跳转操作不仅需要行号，还需要精确的列号。
+    # 本函数根据目标字符串 (target_label)，在当前行代码中智能搜索标识符，
+    # 进而估算并返回光标在此行中的哪一列（列索引）。
     def calculate_col_idx(j_file, j_line, target_label):
         f_abs = os.path.join(cases_dir, j_file)
         with open(f_abs, 'r') as f:
@@ -117,7 +123,8 @@ def discover_tests(cases_dir):
             if m2: return m2.start()
         return 0
 
-    # 关联数据，生成跳转测试任务
+    # === 阶段一：关联 @jump 和 @def，生成跳转(Definition)测试任务 ===
+    # 核心思路是通过它们共享的同一个 label_name 进行配对。
     test_tasks = []
     for j in jumps_raw:
         label = j['label']
@@ -135,7 +142,8 @@ def discover_tests(cases_dir):
                 "label": label
             })
             
-    # 关联数据，生成引用测试任务
+    # === 阶段二：关联 @ref_target 和 @ref_expect，生成引用(References)测试任务 ===
+    # 将被查询的对象和预期应当出现的所有引用位置收集在一起。
     for label, (target_file, target_line) in ref_targets.items():
         if label in ref_expects:
             col_idx = calculate_col_idx(target_file, target_line, label)
@@ -151,6 +159,8 @@ def discover_tests(cases_dir):
             
     return test_tasks
 
+# --- Database Initialization Logic ---
+# 直接为当前测试目录构建索引数据库 (pyclangd_index.db)
 def direct_build_db(workspace_dir, files):
     print(f"🔨 [1/2] 正在构建索引库 (共 {len(files)} 个文件)...")
     
@@ -175,6 +185,9 @@ def direct_build_db(workspace_dir, files):
     
     db.close()
 
+# --- Main Test Execution Engine ---
+# 测试执行引擎主入口。支持多目录隔离，即 `cases/` 目录下的每个子文件夹
+# 都被视为一个独立的工程（workspace）进行索引和测试。
 def run_tests():
     cases_root = os.path.join(current_dir, "cases")
     if not os.path.exists(cases_root):
@@ -217,11 +230,12 @@ def run_tests():
                 for ef, _ in t['expected_refs']:
                     all_files.add(ef)
 
-        # 1. 建库
+        # 1. 建库工作：调用 libclang 和 Database 逻辑建立真实的符号索引
         direct_build_db(cases_dir, list(all_files))
 
         print(f"  └── 启动探测引擎 (共 {len(tasks)} 个测试点)...")
         
+        # 构造虚拟 Server，并挂载当前测试目录对应的 数据库实例 和 虚拟工作区
         class MockServer:
             def __init__(self, db_instance):
                 self.db = db_instance
@@ -231,7 +245,7 @@ def run_tests():
 
         subdir_score = 0
         
-        # 2. 逐个验证
+        # 2. 核心验证工作：逐个触发所有提取出的解析任务
         for task in tasks:
             uri = f"file://{os.path.join(cases_dir, task['file'])}"
             # LSP Position 是 0-indexed
@@ -239,6 +253,7 @@ def run_tests():
             
             try:
                 if task['type'] == 'jump':
+                    # 模拟触发 textDocument/definition 请求 (即 Go to Definition)
                     results = lsp_definition(server, params)
                     success = False
                     actual_info = "None"
@@ -266,6 +281,7 @@ def run_tests():
                     all_results_log.append(f"[{subdir_name}] {status} | Label(jump): {task['label']} | {task['file']}:{task['line']} -> Expected {task['expected_file']}:{task['expected_line']} | Actual: {actual_info}")
                     
                 elif task['type'] == 'ref':
+                    # 模拟触发 textDocument/references 请求 (即 Find References)
                     results = lsp_references(server, params)
                     
                     # Check if all expected refs are returned
