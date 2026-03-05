@@ -7,6 +7,12 @@ import functools
 import logging
 import clang_init
 
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(funcName)s %(message)s'
+)
+
 logger = logging.getLogger("PyClangd")
 logger.setLevel(logging.INFO)
 
@@ -174,15 +180,17 @@ class Database:
 
     def lsp_definition_db(self, file_path, line, col):
         """查定义核心逻辑：优先头文件跳转，后查 USR 跳跃（适配 Symbols 单表融合版架构）"""
-        self.cursor.execute('''
-            SELECT role, usr FROM symbols 
-            WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
+        sqlcmd = f'''
+            SELECT role, usr FROM symbols
+            WHERE file_path = '{file_path}' AND s_line = {line} AND s_col <= {col} AND e_col >= {col}
             ORDER BY
                 (CASE WHEN kind = 'MACRO_DEFINITION' THEN 0 ELSE 1 END),
                 (CASE WHEN role = 'def' THEN 0 ELSE 1 END),
-                (e_col - s_col) ASC LIMIT 1''',
-                (file_path, line, col, col))
+                (e_col - s_col) ASC LIMIT 1'''
+        logger.info(f"lsp_definition_db: {sqlcmd}")
+        self.cursor.execute(sqlcmd)
         res = self.cursor.fetchone()
+        logger.info(f"res1: {res}")
         if not res:
             return []
         role, target_str = res
@@ -192,15 +200,19 @@ class Database:
             if os.path.exists(target_str):
                 return [(target_str, 1, 1, 1, 1)]
             return []
-                
+
         elif role in ('ref', 'def'):
             # 无论是引用处按 F12，还是定义处自己按 F12，统统拿着 USR 去找它的 def 记录
-            self.cursor.execute('''
+            sqlcmd = '''
                 SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
                 FROM symbols 
                 WHERE usr = ? AND role = 'def'
-            ''', (target_str,))
-            return self.cursor.fetchall()
+            '''
+            logger.info(f"role: {role}, target_usr: {target_str}")
+            self.cursor.execute(sqlcmd, (target_str,))
+            res = self.cursor.fetchall()
+            logger.info(f"res2: {res}")
+            return res
 
         return []
 
@@ -213,11 +225,12 @@ class Database:
             return self.get_references_by_usr(usr)
         return []
 
-    def lsp_did_save_db(self, file_path, commands_map):
+    def lsp_did_save_db(self, file_path):
+        logger.info(f"lsp_did_save_db更新数据: {file_path}")
         """处理文件保存时的增量更新逻辑，返回需要重新索引的文件列表及其编译命令"""
         dependent_sources = self.get_sources_including(file_path)
         
-        cmd_info = commands_map.get(file_path)
+        cmd_info = self.commands_map.get(file_path)
         files_to_index = []
 
         if cmd_info:
@@ -226,11 +239,28 @@ class Database:
         for dep_src in dependent_sources:
             if dep_src == file_path:
                 continue
-            dep_cmd = commands_map.get(dep_src)
+            dep_cmd = self.commands_map.get(dep_src)
             if dep_cmd and not any(f[0] == dep_src for f in files_to_index):
                 files_to_index.append((dep_src, dep_cmd))
-                
-        return files_to_index
+        
+        if not files_to_index:
+            logger.warning(f"增量跳过: {file_path} 不在 compile_commands 中，且无关联源文件包含它")
+            return
+
+        logger.info(f"触发增量索引: {os.path.basename(file_path)}, 连带 {len(files_to_index)} 个依赖文件")
+
+        # 启动后台线程跑解析，坚决不阻塞 LSP 主线程的 UI 响应
+        def reindex_task():
+            for src, cmd in files_to_index:
+                # logger.info(f"[开始解析] {src}")
+                status = self.index_worker((cmd, self.workspace_dir))
+                if status == "SUCCESS":
+                    logger.info(f"✅ 更新成功: {os.path.basename(src)}")
+                else:
+                    logger.info(f"❌ 更新失败: {os.path.basename(src)}")
+
+        reindex_task()
+        #threading.Thread(target=reindex_task, daemon=True).start()
 
     def lsp_code_action_db(self, file_path, line, col):
         """查支持的 Code Action 操作 (目前只看是不是宏)"""
@@ -354,11 +384,6 @@ class Database:
                 os.remove(tmp_path)
                 
         return {"error": "Unknown command"}
-
-
-
-
-    
 
 
     def get_usr_at_location(self, file_path, line, col):
@@ -507,6 +532,10 @@ class Database:
         last_raw_file_name = None
         last_realpath_file_name = None
 
+        kind_def = (CursorKind.MACRO_DEFINITION,
+                    CursorKind.FUNCTION_DECL,
+                    CursorKind.VAR_DECL)
+
         # 遍历 AST 节点
         for node in tu.cursor.walk_preorder():
 
@@ -514,10 +543,12 @@ class Database:
                 continue  #跳过没有文件的节点
 
             raw_file_name = node.location.file.name
-            s_line = node.extent.start.line
-            s_col = node.extent.start.column
-            e_line = node.extent.end.line
-            e_col = node.extent.end.column
+            s_line = node.location.line
+            s_col = node.location.column
+
+            #e_line,e_col 暂时没有用到
+            # e_line = node.extent.end.line
+            # e_col = node.extent.end.column
             
             # --- 优化点 1：缓存文件路径解析 ---尽量减少高耗时的os.path.realpath调用
             if raw_file_name == last_raw_file_name:
@@ -531,13 +562,16 @@ class Database:
             kind = node.kind
             
             # --- 角色 A: 提取定义 (Definitions) ---
-            if (kind.is_declaration() and node.is_definition()) or kind == CursorKind.MACRO_DEFINITION:
+            if  node.is_definition() or kind == CursorKind.MACRO_DEFINITION:
+                
                 usr = node.get_usr()
                 if usr:
                     name = node.spelling or ""
-                    symbols_to_upsert.append((realpath_file_name, 
-                                             s_line, s_col, e_line, e_col,
+                    symbols_to_upsert.append((realpath_file_name,
+                                             s_line, s_col, s_line, s_col+len(name),
                                              usr, "def", name, kind.name))
+                    continue
+
 
             # --- 提取 include 引用 ---
             if kind == CursorKind.INCLUSION_DIRECTIVE:
@@ -546,15 +580,15 @@ class Database:
                     inc_file = node.get_included_file()
                     if inc_file and inc_file.name:
                         inc_path = os.path.realpath(inc_file.name)
-                        import os
                         symbols_to_upsert.append((realpath_file_name, 
-                                                 s_line, s_col, e_line, e_col,
+                                                 s_line, s_col, s_line, s_col+len(inc_path),
                                                  inc_path, "inc", os.path.basename(inc_path), "INCLUSION_DIRECTIVE"))
-                continue
+                        continue
 
             # --- 角色 B: 提取引用 (References) ---
             is_ref_node = (
-                kind.is_reference() or 
+                kind.is_declaration() or
+                kind.is_reference() or
                 kind in (
                     CursorKind.DECL_REF_EXPR, 
                     CursorKind.MEMBER_REF_EXPR, 
@@ -565,14 +599,25 @@ class Database:
 
             if is_ref_node:
                 callee = node.referenced
-                if callee and callee != node:
+                if callee:
                     usr = callee.get_usr()
                     if usr:
                         target_name = callee.spelling or ""
                         name = node.spelling or target_name or ""
                         symbols_to_upsert.append((realpath_file_name, 
-                                                 s_line, s_col, e_line, e_col,
+                                                 s_line, s_col, s_line, s_col+len(name),
                                                  usr, "ref", name, callee.kind.name))
+                        continue
+            
+            # 调试专用
+            name = node.spelling or ""
+            usr = node.get_usr()
+            ref_usr = node.referenced.get_usr() if node.referenced else 'None'
+            # if usr == "" and (ref_usr == "None" or ref_usr == ""):
+            #    continue
+            # if kind == CursorKind.UNEXPOSED_EXPR:
+            #    continue
+            logger.info(f"{os.path.basename(realpath_file_name)}|{s_line}|{s_col}|{s_line}|{s_col+len(name)}|usr={usr}|xxx|sp={node.spelling}|{kind.name}|ref_usr=[{ref_usr}]")
 
         # 实例化专属进程的 DB 防止锁冲突
         db = Database(workspace_dir)
@@ -648,3 +693,28 @@ class Database:
 
     def close(self):
         self.conn.close()
+
+    
+
+if __name__ == '__main__':
+    # 删除 pyclangd_index.db
+    import os
+    file = "test_kernel_def.c"
+    workspace_dir = "/home/lc/py-clangd/server/test/cases/kernel/"
+    db_path = workspace_dir+"pyclangd_index.db"
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    db = Database(workspace_dir)
+
+    cmd_info = {
+        "directory": workspace_dir,  # 编译执行的工作目录
+        "file": file,    # 源文件的相对路径或绝对路径
+        
+        # 编译器及编译参数（注意一定要有 -I 指定头文件搜索路径，否则 clang 解析会报错）
+        "arguments": [
+            "clang",
+            "-E",           # 告诉 clang 按照 C 语言解析 (-xc++ 就是 C++)
+        ]
+    }
+    logger.info(f"开始索引: {cmd_info}")
+    db.index_worker((cmd_info, ""))

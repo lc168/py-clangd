@@ -7,3 +7,4 @@ void global_func() {} // @def: global_func
 extern int global_var; // @def: global_var_decl
 
 #endif
+

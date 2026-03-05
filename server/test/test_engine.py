@@ -176,118 +176,140 @@ def direct_build_db(workspace_dir, files):
     db.close()
 
 def run_tests():
-    cases_dir = os.path.join(current_dir, "cases")
-    if not os.path.exists(cases_dir):
-        os.makedirs(cases_dir)
-        print(f"📅 已创建用例目录: {cases_dir}, 请放入测试文件。")
+    cases_root = os.path.join(current_dir, "cases")
+    if not os.path.exists(cases_root):
+        os.makedirs(cases_root)
+        print(f"📅 已创建用例根目录: {cases_root}, 请放入测试子文件夹。")
         return
 
-    db_path = os.path.join(cases_dir, "pyclangd_index.db")
+    subdirs = [os.path.join(cases_root, d) for d in os.listdir(cases_root) 
+               if os.path.isdir(os.path.join(cases_root, d))]
     
-    tasks = discover_tests(cases_dir)
-    if not tasks:
-        print("❓ 未发现任何带有 @jump 标记的测试用例。")
+    if not subdirs:
+        print("❓ cases 目录下未发现任何子文件夹。")
         return
-    
-    # 找出所有涉及的文件进行索引
-    all_files = set()
-    for t in tasks:
-        all_files.add(t['file'])
-        if t['type'] == 'jump':
-            all_files.add(t['expected_file'])
-        elif t['type'] == 'ref':
-            for ef, _ in t['expected_refs']:
-                all_files.add(ef)
 
-    # 1. 建库
-    direct_build_db(cases_dir, list(all_files))
+    total_score = 0
+    total_cases = 0
+    all_results_log = []
 
-    print(f"\n🚀 [2/2] 启动探测引擎 (共 {len(tasks)} 个测试点)...")
-    
-    class MockServer:
-        def __init__(self, db_instance):
-            self.db = db_instance
-            self.workspace = MockWorkspace()
-            
-    server = MockServer(Database(cases_dir, is_main=False))
+    print("="*80)
+    print("🚀 开始多目录隔离测试...")
+    print("="*80)
 
-    score = 0
-    total_cases = len(tasks)
-    results_log = []
-
-    # 2. 逐个验证
-    for task in tasks:
-        uri = f"file://{os.path.join(cases_dir, task['file'])}"
-        # LSP Position 是 0-indexed
-        params = MockParams(uri, task['line'], task['col'])
+    for cases_dir in sorted(subdirs):
+        subdir_name = os.path.basename(cases_dir)
+        print(f"\n📁 正在处理测试目录: [{subdir_name}]")
         
-        try:
-            if task['type'] == 'jump':
-                results = lsp_definition(server, params)
-                success = False
-                actual_info = "None"
+        db_path = os.path.join(cases_dir, "pyclangd_index.db")
+        tasks = discover_tests(cases_dir)
+        if not tasks:
+            print(f"  └── ❓ 未发现任何带有测试标记的文件，跳过。")
+            continue
+        
+        # 找出所有涉及的文件进行索引
+        all_files = set()
+        for t in tasks:
+            all_files.add(t['file'])
+            if t['type'] == 'jump':
+                all_files.add(t['expected_file'])
+            elif t['type'] == 'ref':
+                for ef, _ in t['expected_refs']:
+                    all_files.add(ef)
+
+        # 1. 建库
+        direct_build_db(cases_dir, list(all_files))
+
+        print(f"  └── 启动探测引擎 (共 {len(tasks)} 个测试点)...")
+        
+        class MockServer:
+            def __init__(self, db_instance):
+                self.db = db_instance
+                self.workspace = MockWorkspace()
                 
-                if results:
-                    # 检查是否命中了期望的文件和行
-                    for res in results:
-                        actual_file = os.path.relpath(res.uri.replace("file://", ""), cases_dir)
-                        actual_line = res.range.start.line
-                        if actual_file == task['expected_file'] and actual_line == task['expected_line']:
-                            success = True
-                            break
+        server = MockServer(Database(cases_dir))
+
+        subdir_score = 0
+        
+        # 2. 逐个验证
+        for task in tasks:
+            uri = f"file://{os.path.join(cases_dir, task['file'])}"
+            # LSP Position 是 0-indexed
+            params = MockParams(uri, task['line'], task['col'])
+            
+            try:
+                if task['type'] == 'jump':
+                    results = lsp_definition(server, params)
+                    success = False
+                    actual_info = "None"
                     
-                    # 记录第一个结果用于显示
-                    first_res = results[0]
-                    first_file = os.path.relpath(first_res.uri.replace("file://", ""), cases_dir)
-                    actual_info = f"{first_file}:{first_res.range.start.line}"
+                    if results:
+                        # 检查是否命中了期望的文件和行
+                        for res in results:
+                            actual_file = os.path.relpath(res.uri.replace("file://", ""), cases_dir)
+                            actual_line = res.range.start.line
+                            if actual_file == task['expected_file'] and actual_line == task['expected_line']:
+                                success = True
+                                break
+                        
+                        # 记录第一个结果用于显示
+                        first_res = results[0]
+                        first_file = os.path.relpath(first_res.uri.replace("file://", ""), cases_dir)
+                        actual_info = f"{first_file}:{first_res.range.start.line}"
 
-                if success:
-                    score += 1
-                    status = "✅ PASS"
-                else:
-                    status = "❌ FAIL"
-                
-                results_log.append(f"{status} | Label(jump): {task['label']} | {task['file']}:{task['line']} -> Expected {task['expected_file']}:{task['expected_line']} | Actual: {actual_info}")
-                
-            elif task['type'] == 'ref':
-                results = lsp_references(server, params)
-                
-                # Check if all expected refs are returned
-                expected_set = set(task['expected_refs']) # set of (file, line)
-                actual_set = set()
-                actual_info = []
-                
-                if results:
-                    for res in results:
-                        actual_file = os.path.relpath(res.uri.replace("file://", ""), cases_dir)
-                        actual_line = res.range.start.line
-                        actual_set.add((actual_file, actual_line))
-                        actual_info.append(f"{actual_file}:{actual_line}")
-                
-                missing = expected_set - actual_set
-                
-                if not missing:
-                    score += 1
-                    status = "✅ PASS"
-                else:
-                    status = "❌ FAIL"
+                    if success:
+                        subdir_score += 1
+                        status = "✅ PASS"
+                    else:
+                        status = "❌ FAIL"
                     
-                actual_info_str = ", ".join(actual_info) if actual_info else "None"
-                expected_info_str = ", ".join([f"{f}:{l}" for f, l in expected_set])
-                results_log.append(f"{status} | Label(ref): {task['label']} | {task['file']}:{task['line']} -> Expected: [{expected_info_str}] | Actual: [{actual_info_str}]")
-                if missing:
-                    results_log.append(f"          ↳ Missing: {missing}")
+                    all_results_log.append(f"[{subdir_name}] {status} | Label(jump): {task['label']} | {task['file']}:{task['line']} -> Expected {task['expected_file']}:{task['expected_line']} | Actual: {actual_info}")
+                    
+                elif task['type'] == 'ref':
+                    results = lsp_references(server, params)
+                    
+                    # Check if all expected refs are returned
+                    expected_set = set(task['expected_refs']) # set of (file, line)
+                    actual_set = set()
+                    actual_info = []
+                    
+                    if results:
+                        for res in results:
+                            actual_file = os.path.relpath(res.uri.replace("file://", ""), cases_dir)
+                            actual_line = res.range.start.line
+                            actual_set.add((actual_file, actual_line))
+                            actual_info.append(f"{actual_file}:{actual_line}")
+                    
+                    missing = expected_set - actual_set
+                    
+                    if not missing:
+                        subdir_score += 1
+                        status = "✅ PASS"
+                    else:
+                        status = "❌ FAIL"
+                        
+                    actual_info_str = ", ".join(actual_info) if actual_info else "None"
+                    expected_info_str = ", ".join([f"{f}:{l}" for f, l in expected_set])
+                    all_results_log.append(f"[{subdir_name}] {status} | Label(ref): {task['label']} | {task['file']}:{task['line']} -> Expected: [{expected_info_str}] | Actual: [{actual_info_str}]")
+                    if missing:
+                        all_results_log.append(f"          ↳ Missing: {missing}")
 
-        except Exception as e:
-            results_log.append(f"💥 CRASH | Label({task['type']}): {task['label']} | Error: {e}")
+            except Exception as e:
+                all_results_log.append(f"[{subdir_name}] 💥 CRASH | Label({task['type']}): {task['label']} | Error: {e}")
 
+        total_score += subdir_score
+        total_cases += len(tasks)
+
+    print("\n" + "="*80)
+    print("📊 PyClangd Bug 多目录隔离探测报告")
     print("="*80)
-    print("📊 PyClangd Bug 探测报告")
-    print("="*80)
-    for log in results_log:
+    for log in all_results_log:
         print(log)
     print("-" * 80)
-    print(f"🎯 最终得分: {score} / {total_cases} | 准确率: {(score/total_cases)*100:.2f}%")
+    if total_cases > 0:
+        print(f"🎯 最终得分: {total_score} / {total_cases} | 准确率: {(total_score/total_cases)*100:.2f}%")
+    else:
+        print("🎯 没有执行任何测试用例。")
     print("="*80)
 
 if __name__ == "__main__":

@@ -73,34 +73,16 @@ ls = PyClangdServer("pyclangd", "1.0.0")
 @ls.feature(TEXT_DOCUMENT_DID_SAVE)
 def lsp_did_save(server: PyClangdServer, params):
     """当 VS Code 里按下 Ctrl+S，触发单文件增量更新"""
-    file_path = os.path.normpath(params.text_document.uri.replace("file://", ""))
-    if not server.db:
-        return
+    file_path = os.path.realpath(params.text_document.uri.replace("file://", ""))
+    
+    # 进行数据库更新动作
+    server.db.lsp_did_save_db(file_path)
 
-    files_to_index = server.db.lsp_did_save_db(file_path, server.db.commands_map)
-
-    if not files_to_index:
-        logger.warning(f"增量跳过: {file_path} 不在 compile_commands 中，且无关联源文件包含它")
-        return
-
-    logger.info(f"触发增量索引: {os.path.basename(file_path)}, 连带 {len(files_to_index)} 个依赖文件")
-
-    # 启动后台线程跑解析，坚决不阻塞 LSP 主线程的 UI 响应
-    def reindex_task():
-        for src, cmd in files_to_index:
-            # logger.info(f"[开始解析] {src}")
-            status = server.db.index_worker((cmd, server.db.workspace_dir))
-            if status == "SUCCESS":
-                logger.info(f"✅ 更新成功: {os.path.basename(src)}")
-            else:
-                logger.info(f"❌ 更新失败: {os.path.basename(src)}")
-
-    threading.Thread(target=reindex_task, daemon=True).start()
 
 @ls.feature(TEXT_DOCUMENT_DOCUMENT_SYMBOL)
 def lsp_document_symbols(server: PyClangdServer, params):
     """大纲视图：从数据库秒级查询"""
-    file_path = os.path.normpath(params.text_document.uri.replace("file://", ""))
+    file_path = os.path.realpath(params.text_document.uri.replace("file://", ""))
     symbols = []
     if server.db:
         for name, kind_id, sl, sc, el, ec in server.db.lsp_document_symbols_db(file_path):
