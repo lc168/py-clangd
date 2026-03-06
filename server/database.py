@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# mytodo 1. 增加对汇编文件的支持
+# mytodo 2. 增加对宏展开的支持
+# mytodo 3. 增加对c++分析的支持
+# mytodo 4. 增加对函数调用关系的绘制
+# mytodo 5. 增加对结构体变量的绘制
+# mytodo 6. 修改index_worker(args) 和后面的参数清洗
+# mytodo 7. lsp_did_save_db改成单文件更新
+# mytodo 8. 继续梳理代码逻辑，考虑还有那些功能？？为什么宏函数好像还是漏掉了？
+# mytodo 9, 引用读，写，执行？定义？分析？
+
 import sqlite3
 import os
 import time
@@ -160,8 +170,8 @@ class Database:
         self.cursor.execute('SELECT DISTINCT file_path FROM symbols WHERE role = "inc" AND usr = ?', (included_file,))
         return [row[0] for row in self.cursor.fetchall()]
 
-    # --- 从底层拆解上来的高层查询逻辑 (对应 LSP 请求) ---
     def lsp_document_symbols_db(self, file_path):
+        #mytodo bug需要修复，获取符号表
         self.cursor.execute('''
             SELECT name, kind, s_line, s_col, e_line, e_col 
             FROM symbols
@@ -170,7 +180,7 @@ class Database:
         return self.cursor.fetchall()
 
     def lsp_workspace_symbols_db(self, query):
-    # 全局搜索
+    # 全局搜索关键字
         self.cursor.execute('''
             SELECT name, file_path, s_line, s_col, usr 
             FROM symbols
@@ -179,18 +189,17 @@ class Database:
         return self.cursor.fetchall()
 
     def lsp_definition_db(self, file_path, line, col):
+        # 获取定义
         """查定义核心逻辑：优先头文件跳转，后查 USR 跳跃（适配 Symbols 单表融合版架构）"""
-        sqlcmd = f'''
+        self.cursor.execute('''
             SELECT role, usr FROM symbols
-            WHERE file_path = '{file_path}' AND s_line = {line} AND s_col <= {col} AND e_col >= {col}
+            WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
             ORDER BY
                 (CASE WHEN kind = 'MACRO_DEFINITION' THEN 0 ELSE 1 END),
                 (CASE WHEN role = 'def' THEN 0 ELSE 1 END),
-                (e_col - s_col) ASC LIMIT 1'''
-        logger.info(f"lsp_definition_db: {sqlcmd}")
-        self.cursor.execute(sqlcmd)
+                (e_col - s_col) ASC LIMIT 1''', (file_path, line, col, col))
         res = self.cursor.fetchone()
-        logger.info(f"res1: {res}")
+        logger.info(f"find usr res: {res}")
         if not res:
             return []
         role, target_str = res
@@ -208,25 +217,35 @@ class Database:
                 FROM symbols 
                 WHERE usr = ? AND role = 'def'
             '''
-            logger.info(f"role: {role}, target_usr: {target_str}")
             self.cursor.execute(sqlcmd, (target_str,))
             res = self.cursor.fetchall()
-            logger.info(f"res2: {res}")
+            logger.info(f"find def: {res}")
             return res
 
         return []
 
-
-
     def lsp_references_db(self, file_path, line, col):
+        # mymark 获取变量引用
         """查引用核心逻辑"""
         usr = self.get_usr_at_location(file_path, line, col)
         if usr:
+            logger.info(f"找到{usr}")
             return self.get_references_by_usr(usr)
+        else:
+            logger.info(f"没有找到:{file_path}:{line}:{col}的usr")
         return []
 
     def lsp_did_save_db(self, file_path):
-        logger.info(f"lsp_did_save_db更新数据: {file_path}")
+        #mymark  lsp_did_save_db这里消耗的时间实在太久了，只能暂时跳过，需要好好想想办法，如果想彻底解决，
+        # 也许真的需要深度分析编译文件的依赖关系,那么真的有点复杂了，建议改成主动增量索引
+        # 主动增量索引也有两种方式，
+        # 一种是自己分析依赖了那些头文件，
+        # 另外一种是直接bear -- make 根据产生的新的compile_commands.json文件， 重新增量索引
+        # py_clangd 增加 compile_commands.json文件 的参数
+        # 现在看移动目录执行编译命令是必须的，
+        logger.info(f"暂时不编译更新: {file_path}")
+        
+        return
         """处理文件保存时的增量更新逻辑，返回需要重新索引的文件列表及其编译命令"""
         dependent_sources = self.get_sources_including(file_path)
         
@@ -239,6 +258,7 @@ class Database:
         for dep_src in dependent_sources:
             if dep_src == file_path:
                 continue
+
             dep_cmd = self.commands_map.get(dep_src)
             if dep_cmd and not any(f[0] == dep_src for f in files_to_index):
                 files_to_index.append((dep_src, dep_cmd))
@@ -262,7 +282,14 @@ class Database:
         reindex_task()
         #threading.Thread(target=reindex_task, daemon=True).start()
 
+    def is_macro(self, usr):
+        """判断一个符号是否为宏"""
+        self.cursor.execute('SELECT kind FROM symbols WHERE usr = ?', (usr,))
+        res = self.cursor.fetchone()
+        return res and res[0] == 'MACRO_DEFINITION'
+
     def lsp_code_action_db(self, file_path, line, col):
+        # mymark lsp_code_action_db 目前只看是不是宏，这个功能基本是正常的！
         """查支持的 Code Action 操作 (目前只看是不是宏)"""
         usr = self.get_usr_at_location(file_path, line, col)
         if usr and self.is_macro(usr):
@@ -270,121 +297,10 @@ class Database:
         return None
 
     def lsp_execute_command_db(self, command, args, commands_map):
+        #mymark 以后处理宏展开功能
         """执行后台复杂指令，比如宏展开"""
-        if command == "pyclangd.expandMacro":
-            import os, shlex, tempfile, re, subprocess
-            from cindex import Index, CursorKind
-            uri, line_0, col_0 = args
-            file_path = os.path.normpath(uri.replace("file://", ""))
-            
-            cmd_info = commands_map.get(file_path)
-            if not cmd_info:
-                return {"error": f"Cannot expand macro: missing compile_commands mapping for {file_path}"}
-            
-            idx = Index.create()
-            raw_args = cmd_info.get('arguments', [])
-            if not raw_args:
-                command_str = cmd_info.get('command', '')
-                if command_str: raw_args = shlex.split(command_str)
-            
-            compiler_args = []
-            skip_next = False
-            for arg in raw_args[1:]:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if arg == '-o':
-                    skip_next = True
-                    continue
-                if arg in ('-c', '-S'): continue
-                if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')): continue
-                if arg == '-MF':
-                    skip_next = True
-                    continue
-                compiler_args.append(arg)
-            
-            compiler_args.append('-fsyntax-only')
-            compiler_args.extend([
-                '-ferror-limit=0', '-Wno-error', '-Wno-strict-prototypes',
-                '-Wno-implicit-int', '-Wno-unknown-warning-option',
-                '-Wno-unknown-attributes', '-Qunused-arguments'
-            ])
-            
-            directory = cmd_info.get('directory', '')
-            if directory:
-                compiler_args.extend(['-working-directory', directory])
-                
-            compiler_path = raw_args[0] if raw_args else ''
-            if 'aarch64' in compiler_path or 'arm64' in compiler_path:
-                compiler_args.append('--target=aarch64-linux-gnu')
-            elif 'arm' in compiler_path:
-                compiler_args.append('--target=arm-linux-gnueabihf')
-                
-            builtin_includes = '/home/lc/llvm22/lib/clang/22/include' 
-            compiler_args.extend(['-isystem', builtin_includes])
-
-            tu = idx.parse(file_path, args=compiler_args, options=0x01)
-            
-            target_node = None
-            line_1 = line_0 + 1
-            col_1 = col_0 + 1
-            for node in tu.cursor.walk_preorder():
-                if node.kind == CursorKind.MACRO_INSTANTIATION:
-                    loc = node.extent
-                    if loc.start.line == line_1 and loc.start.column <= col_1 <= loc.end.column:
-                        target_node = node
-                        break
-                        
-            if not target_node:
-                return {"error": f"Cannot find MACRO_INSTANTIATION at {line_1}:{col_1}"}
-                
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-                
-            s_line = target_node.extent.start.line - 1
-            s_col = target_node.extent.start.column - 1
-            e_line = target_node.extent.end.line - 1
-            e_col = target_node.extent.end.column - 1
-            
-            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".c", dir=os.path.dirname(file_path))
-            os.close(tmp_fd)
-            
-            try:
-                mod_lines = lines.copy()
-                mod_lines[e_line] = mod_lines[e_line][:e_col] + "/*PYCLANGD_END*/" + mod_lines[e_line][e_col:]
-                mod_lines[s_line] = mod_lines[s_line][:s_col] + "/*PYCLANGD_START*/" + mod_lines[s_line][s_col:]
-                
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    f.writelines(mod_lines)
-                
-                clang_e_args = compiler_args.copy()
-                if '-fsyntax-only' in clang_e_args:
-                    clang_e_args.remove('-fsyntax-only')
-                
-                cmd = ["clang", "-E", "-C"] + clang_e_args + [tmp_path]
-                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                output = result.stdout
-                
-                match = re.search(r'/\*PYCLANGD_START\*/(.*?)/\*PYCLANGD_END\*/', output, re.DOTALL)
-                if match:
-                    expanded_text = match.group(1).strip()
-                    return {
-                        "success": True,
-                        "text": expanded_text,
-                        "s_line": s_line,
-                        "s_col": s_col,
-                        "e_line": e_line,
-                        "e_col": e_col
-                    }
-                else:
-                    return {"error": "Failed to extract expanded text"}
-            except Exception as e:
-                return {"error": f"Subprocess error: {e}"}
-            finally:
-                os.remove(tmp_path)
-                
-        return {"error": "Unknown command"}
-
+        if command == "pyclangd.expand_macro":
+            return {"error": "Unknown command"}
 
     def get_usr_at_location(self, file_path, line, col):
         """核心：查询特定坐标下的符号 USR (精准跳转的基础)"""
@@ -403,6 +319,7 @@ class Database:
         return res[0] if res else None
 
     def get_definitions_by_usr(self, usr):
+        # myark 这个函数在项目中没有使用，但是在其他测试验证文件中使用了
         """通过 USR 精确查找定义位置"""
         self.cursor.execute('''
             SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
@@ -412,6 +329,7 @@ class Database:
 
     def get_references_by_usr(self, usr):
         """查 USR 对应的所有引用位置（包含声明/定义、调用、读取等）"""
+        # 这个是查询所有引的的关键函数
         self.cursor.execute('''
             SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
             FROM symbols WHERE usr = ? AND role IN ('ref', 'def')
@@ -419,6 +337,7 @@ class Database:
         return self.cursor.fetchall()
 
     def get_references_by_name(self, name):
+        # mymark 这个函数在项目中没有使用，可以删除
         """查名字对应的所有引用位置 (作为兜底)"""
         self.cursor.execute('''
             SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
@@ -426,12 +345,6 @@ class Database:
             WHERE name = ? AND role IN ('ref', 'def')
         ''', (name,))
         return self.cursor.fetchall()
-
-    def is_macro(self, usr):
-        """判断一个符号是否为宏"""
-        self.cursor.execute('SELECT kind FROM symbols WHERE usr = ?', (usr,))
-        res = self.cursor.fetchone()
-        return res and res[0] == 'MACRO_DEFINITION'
 
     # =========================================================================
     # --- 构建索引与解析体系 (从原来的 pyclangd_server 中抽取) ---
@@ -494,19 +407,19 @@ class Database:
         """核心解析工人进程：为了支持多进程，必须为静态方法"""
         import os, shlex
         from cindex import Index, CursorKind
-        
+        # mymark 参数清洗这里好好修改一下
         cmd_info, workspace_dir = args
         
         directory = cmd_info.get('directory', '')
         file_rel = cmd_info.get('file', '')
         source_file = os.path.realpath(os.path.join(directory, file_rel)) 
-        
+
         raw_args = cmd_info.get('arguments')
         if not raw_args:
             command_str = cmd_info.get('command', '')
             if command_str: raw_args = shlex.split(command_str)
             else: raw_args = []
-
+        
         compiler_args = Database._clean_compiler_args(raw_args, directory, source_file)
 
         idx = Index.create()
@@ -586,6 +499,7 @@ class Database:
                         continue
 
             # --- 角色 B: 提取引用 (References) ---
+            #mymark 这个判断还有必要吗？
             is_ref_node = (
                 kind.is_declaration() or
                 kind.is_reference() or
@@ -613,10 +527,10 @@ class Database:
             name = node.spelling or ""
             usr = node.get_usr()
             ref_usr = node.referenced.get_usr() if node.referenced else 'None'
-            # if usr == "" and (ref_usr == "None" or ref_usr == ""):
-            #    continue
-            # if kind == CursorKind.UNEXPOSED_EXPR:
-            #    continue
+            if usr == "" and (ref_usr == "None" or ref_usr == ""):
+               continue
+            if kind == CursorKind.UNEXPOSED_EXPR:
+               continue
             logger.info(f"{os.path.basename(realpath_file_name)}|{s_line}|{s_col}|{s_line}|{s_col+len(name)}|usr={usr}|xxx|sp={node.spelling}|{kind.name}|ref_usr=[{ref_usr}]")
 
         # 实例化专属进程的 DB 防止锁冲突
@@ -653,11 +567,17 @@ class Database:
             file_rel = cmd.get('file', '')
             abs_path = os.path.realpath(os.path.join(directory, file_rel))
 
+            if abs_path.endswith(('.s', '.S')):
+                logger.info(f"文件 {abs_path} 是汇编文件，跳过解析")
+                continue
+
             if not os.path.exists(abs_path):
+                logger.error(f"文件 {abs_path} 不存在")
                 continue
                 
             mtime = os.path.getmtime(abs_path)
             if abs_path in indexed_files and indexed_files[abs_path] >= mtime:
+                logger.info(f"文件 {abs_path} 已是最新状态，无需合并解析！")
                 continue
                 
             tasks.append((cmd, workspace_dir))
@@ -696,25 +616,25 @@ class Database:
 
     
 
-if __name__ == '__main__':
-    # 删除 pyclangd_index.db
-    import os
-    file = "test_kernel_def.c"
-    workspace_dir = "/home/lc/py-clangd/server/test/cases/kernel/"
-    db_path = workspace_dir+"pyclangd_index.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    db = Database(workspace_dir)
+# if __name__ == '__main__':
+#     # 删除 pyclangd_index.db
+#     import os
+#     file = "test_kernel_def.c"
+#     workspace_dir = "/home/lc/py-clangd/server/test/cases/kernel/"
+#     db_path = workspace_dir+"pyclangd_index.db"
+#     if os.path.exists(db_path):
+#         os.remove(db_path)
+#     db = Database(workspace_dir)
 
-    cmd_info = {
-        "directory": workspace_dir,  # 编译执行的工作目录
-        "file": file,    # 源文件的相对路径或绝对路径
+#     cmd_info = {
+#         "directory": workspace_dir,  # 编译执行的工作目录
+#         "file": file,    # 源文件的相对路径或绝对路径
         
-        # 编译器及编译参数（注意一定要有 -I 指定头文件搜索路径，否则 clang 解析会报错）
-        "arguments": [
-            "clang",
-            "-E",           # 告诉 clang 按照 C 语言解析 (-xc++ 就是 C++)
-        ]
-    }
-    logger.info(f"开始索引: {cmd_info}")
-    db.index_worker((cmd_info, ""))
+#         # 编译器及编译参数（注意一定要有 -I 指定头文件搜索路径，否则 clang 解析会报错）
+#         "arguments": [
+#             "clang",
+#             "-E",           # 告诉 clang 按照 C 语言解析 (-xc++ 就是 C++)
+#         ]
+#     }
+#     logger.info(f"开始索引: {cmd_info}")
+#     db.index_worker((cmd_info, ""))

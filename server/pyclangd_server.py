@@ -7,6 +7,17 @@ import json
 import argparse
 import shlex
 
+# 日志定向到 stderr，VS Code 才能在输出窗口显示
+logging.basicConfig(level=logging.WARNING,
+                    stream=sys.stderr,
+                    format='[%(name)s]%(funcName)s: %(message)s'
+                    )
+
+#创建PyClangd标记的打印
+logger = logging.getLogger("PyClangd")
+# # 单独把我们自己的 PyClangd 设置为 INFO 级别，这样只有我们的进度条会显示
+logger.setLevel(logging.INFO)
+
 try:
     from pygls.server import LanguageServer
     from lsprotocol.types import (
@@ -46,20 +57,8 @@ from database import Database
 from cindex import Index, Cursor, CursorKind, Config
 import clang_init
 
-# 日志定向到 stderr，VS Code 才能在输出窗口显示
-logging.basicConfig(level=logging.WARNING,
-                    stream=sys.stderr,
-                    format='%(levelname)s [%(name)s]: %(message)s'
-                    )
-
-#创建PyClangd标记的打印
-logger = logging.getLogger("PyClangd")
-# # 单独把我们自己的 PyClangd 设置为 INFO 级别，这样只有我们的进度条会显示
-logger.setLevel(logging.INFO)
-
 # --- LSP 服务端类 ---
 import threading
-
 import typing
 
 # 在 PyClangdServer 初始化时，存一下命令字典，方便单文件查询
@@ -74,7 +73,6 @@ ls = PyClangdServer("pyclangd", "1.0.0")
 def lsp_did_save(server: PyClangdServer, params):
     """当 VS Code 里按下 Ctrl+S，触发单文件增量更新"""
     file_path = os.path.realpath(params.text_document.uri.replace("file://", ""))
-    
     # 进行数据库更新动作
     server.db.lsp_did_save_db(file_path)
 
@@ -152,7 +150,7 @@ def lsp_definition(server: PyClangdServer, params):
         return None
 
     except Exception as e:
-        logger.error(f"lsp_definition 崩溃: {e}")
+        logger.exception(f"lsp_definition 崩溃: {e}")
         return None
 
 
@@ -189,7 +187,7 @@ def lsp_references(server: PyClangdServer, params):
         return []
 
     except Exception as e:
-        logger.error(f"lsp_references 崩溃: {e}")
+        logger.exception(f"lsp_references 崩溃: {e}")
         return []
 
 
@@ -262,10 +260,6 @@ def main():
     if args.server:
         ls.db = Database(args.directory)
         ls.db.load_commands_map()
-
-        import threading
-        threading.Thread(target=ls.db.run_index_mode, args=(args.jobs,), daemon=True).start()
-
         logger.info(f"🌐 启动 PyClangd LSP Server (Workspace: {args.directory}) ...")
         ls.start_io()
     else:
