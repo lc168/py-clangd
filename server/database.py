@@ -243,8 +243,17 @@ class Database:
         # 另外一种是直接bear -- make 根据产生的新的compile_commands.json文件， 重新增量索引
         # py_clangd 增加 compile_commands.json文件 的参数
         # 现在看移动目录执行编译命令是必须的，
-        logger.info(f"暂时不编译更新: {file_path}")
-        
+        logger.info(f"开始编译更新: {file_path}")
+        cmd_info = self.commands_map.get(file_path)
+        if not cmd_info:
+            logger.error(f"没有找到编译命令: {file_path}")
+            return
+        status = self.index_worker((cmd_info, self.workspace_dir))
+        if status == "SUCCESS":
+            logger.info(f"✅ 更新成功: {os.path.basename(file_path)}")
+        else:
+            logger.info(f"❌ 更新失败: {os.path.basename(file_path)}")
+
         return
         """处理文件保存时的增量更新逻辑，返回需要重新索引的文件列表及其编译命令"""
         dependent_sources = self.get_sources_including(file_path)
@@ -475,7 +484,14 @@ class Database:
             kind = node.kind
             
             # --- 角色 A: 提取定义 (Definitions) ---
-            if  node.is_definition() or kind == CursorKind.MACRO_DEFINITION:
+            is_def = node.is_definition()
+            if not is_def and kind == CursorKind.VAR_DECL:
+                # 兼容 tentative definitions (例如 void *initial_boot_params; 这种没有初始化器的全局变量)
+                # 这种变量 is_definition() 为 False，但没有 extern，应作为定义保存。
+                if node.storage_class.name != 'EXTERN':
+                    is_def = True
+
+            if is_def or kind == CursorKind.MACRO_DEFINITION:
                 
                 usr = node.get_usr()
                 if usr:
