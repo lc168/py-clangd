@@ -243,7 +243,8 @@ class Database:
         # 另外一种是直接bear -- make 根据产生的新的compile_commands.json文件， 重新增量索引
         # py_clangd 增加 compile_commands.json文件 的参数
         # 现在看移动目录执行编译命令是必须的，
-        logger.info(f"开始编译更新: {file_path}")
+        logger.info(f"bug!开始编译更新: {file_path}")
+        return
         cmd_info = self.commands_map.get(file_path)
         if not cmd_info:
             logger.error(f"没有找到编译命令: {file_path}")
