@@ -464,14 +464,15 @@ class Database:
             if not node.location.file:
                 continue  #跳过没有文件的节点
 
-            raw_file_name = node.location.file.name
-            s_line = node.location.line
-            s_col = node.location.column
+            # --- 核心修复：使用拼写位置 (Spelling Location) ---
+            # 对于宏展开中的节点，node.location 指向宏调用起始位置，
+            # 而 spelling location 指向源码中实际书写该标识符的位置。
+            loc = node.location
+            spelling_file = loc.spelling_file
+            raw_file_name = spelling_file.name if spelling_file else loc.file.name
+            s_line = loc.spelling_line
+            s_col = loc.spelling_column
 
-            #e_line,e_col 暂时没有用到
-            # e_line = node.extent.end.line
-            # e_col = node.extent.end.column
-            
             # --- 优化点 1：缓存文件路径解析 ---尽量减少高耗时的os.path.realpath调用
             if raw_file_name == last_raw_file_name:
                 realpath_file_name = last_realpath_file_name

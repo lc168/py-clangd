@@ -330,6 +330,31 @@ class SourceLocation(Structure):
         """Get the file offset represented by this source location."""
         return self._get_instantiation()[3]
 
+    def _get_spelling(self):
+        if not hasattr(self, '_spelling_data'):
+            f, l, c, o = c_object_p(), c_uint(), c_uint(), c_uint()
+            conf.lib.clang_getSpellingLocation(
+                self, byref(f), byref(l), byref(c), byref(o)
+            )
+            if f:
+                f = File(f)
+            else:
+                f = None
+            self._spelling_data = (f, int(l.value), int(c.value), int(o.value))
+        return self._spelling_data
+
+    @property
+    def spelling_file(self):
+        return self._get_spelling()[0]
+
+    @property
+    def spelling_line(self):
+        return self._get_spelling()[1]
+
+    @property
+    def spelling_column(self):
+        return self._get_spelling()[2]
+
     @property
     def is_in_system_header(self):
         """Returns true if the given source location is in a system header."""
@@ -4236,6 +4261,16 @@ FUNCTION_LIST: list[LibFunc] = [
     ),
     (
         "clang_getInstantiationLocation",
+        [
+            SourceLocation,
+            POINTER(c_object_p),
+            POINTER(c_uint),
+            POINTER(c_uint),
+            POINTER(c_uint),
+        ],
+    ),
+    (
+        "clang_getSpellingLocation",
         [
             SourceLocation,
             POINTER(c_object_p),
