@@ -447,7 +447,7 @@ class Database:
                     break
         except Exception as e:
             logger.error(f"libclang 解析崩溃 [{source_file}]: {e}")
-            return "FAILED"
+            return ("FAILED", source_file)
 
         symbols_to_upsert = []
         refs_to_insert = []
@@ -558,7 +558,7 @@ class Database:
         db.save_parse_result(source_file, mtime, symbols_to_upsert)
         db.close()
         
-        return "SUCCESS"
+        return ("SUCCESS", source_file)
 
     def run_index_mode(self, jobs):
         """主动索引模式（带增量更新与断点续传）"""
@@ -620,15 +620,15 @@ class Database:
         with multiprocessing.Pool(processes=max_workers) as pool:
             # 使用 imap_unordered 可以极大地节省内存，它不会一次性把所有任务结果憋在内存里
             # 而是像流水线一样，谁先完成就先吐出谁的结果
-            for res in pool.imap_unordered(Database.index_worker, tasks):
+            for res, finished_file in pool.imap_unordered(Database.index_worker, tasks):
                 completed += 1
                 
                 if res == "FAILED":
-                    logger.error(f"某个文件处理失败，请查看上方详细日志")
+                    logger.error(f"某个文件处理失败，请查看上方详细日志 {finished_file}")
 
                 elapsed = time() - start_time
                 progress = (completed / total) * 100
-                logger.info(f"进度: [{completed}/{total}] {progress:.1f}% | 耗时: {elapsed:.2f}s")
+                logger.info(f"进度: [{completed}/{total}] {progress:.1f}% | 耗时: {elapsed:.2f}s {finished_file}")
 
     def close(self):
         self.conn.close()
