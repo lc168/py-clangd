@@ -8,6 +8,7 @@
 # mytodo 7. lsp_did_save_db改成单文件更新
 # mytodo 8. 继续梳理代码逻辑，考虑还有那些功能？？为什么宏函数好像还是漏掉了？
 # mytodo 9, 引用读，写，执行？定义？分析？
+# mytodo 10, 增加libclang的so库准备发布代码
 
 import sqlite3
 import os
@@ -361,7 +362,7 @@ class Database:
     # =========================================================================
 
     @staticmethod
-    def _clean_compiler_args(raw_args, directory, source_file=None):
+    def _clean_compiler_args(raw_args, directory, source_file=None):#mymark 这里参数需要裁剪一下
         """清洗并组装传递给 libclang 的编译参数"""
         import os
         compiler_args = []
@@ -372,15 +373,15 @@ class Database:
             if skip_next:
                 skip_next = False
                 continue
-                
             if arg == '-o':
                 skip_next = True
                 continue
-            if arg in ('-c', '-S'):
+            if arg in ('-c', '-S'):#mymark 这里可能需要去掉
                 continue
             if source_basename and os.path.basename(arg) == source_basename:
                 continue
-            if arg in ('-fconserve-stack', '-fno-var-tracking-assignments', '-fmerge-all-constants', '-fno-allow-store-data-races') or arg.startswith(('-mabi=', '-falign-kernels', '-mpreferred-stack-boundary=')):
+            if arg in ('-fconserve-stack', '-fno-code-hoisting','-fno-var-tracking-assignments', '-fmerge-all-constants', '-fno-allow-store-data-races') \
+                or arg.startswith(('-mabi=', '-falign-kernels', '-mpreferred-stack-boundary=')):
                 continue
             if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')):
                 continue
@@ -392,8 +393,8 @@ class Database:
             
             compiler_args.append(arg)
 
-        compiler_args.append('-fsyntax-only')
-        compiler_args.append('-ferror-limit=0')
+        compiler_args.append('-fsyntax-only') #mymark 这里需要理解一下
+        compiler_args.append('-ferror-limit=0') #mymark 这里需要理解一下
         compiler_args.extend([
             '-Wno-error', '-Wno-strict-prototypes', '-Wno-implicit-int',
             '-Wno-unknown-warning-option', '-Wno-unknown-attributes', '-Qunused-arguments'
@@ -408,8 +409,8 @@ class Database:
         elif 'arm' in compiler_path:
             compiler_args.append('--target=arm-linux-gnueabihf')
 
-        builtin_includes = '/home/lc/llvm22/lib/clang/22/include' 
-        compiler_args.extend(['-isystem', builtin_includes])
+        builtin_includes = '/home/lc/llvm22/lib/clang/22/include'  #mymark 这里需要规范一下，不能依赖固定的系统文件
+        compiler_args.extend(['-isystem', builtin_includes])  #mymark这里需要梳理一下是否会有冲突导致问题
         return compiler_args
 
     @staticmethod
