@@ -63,8 +63,8 @@ struct KernelLogEnhancer : public PassInfoMixin<KernelLogEnhancer> {
                 while (DIL->getInlinedAt()) DIL = DIL->getInlinedAt();
 
                 std::string FileName = DIL->getFilename().str();
-                size_t LastSlash = FileName.find_last_of("/");
-                if (LastSlash != std::string::npos) FileName = FileName.substr(LastSlash + 1);
+                // size_t LastSlash = FileName.find_last_of("/");
+                // if (LastSlash != std::string::npos) FileName = FileName.substr(LastSlash + 1);
                 
                 // 4. 执行替换并打印调试信息到终端
                 std::string RawStr = CDA->getAsString().str();
