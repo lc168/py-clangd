@@ -1,6 +1,6 @@
 # PyClangd
 
-**PyClangd** 是一个基于 **LLVM 22 (libclang)** 和 **Python** 构建的轻量级、高性能 C/C++ 语言服务器（Language Server Protocol, LSP），并提供原生的 VS Code 插件支持。
+**PyClangd** 是一个基于 **LLVM 23 (libclang)** 和 **Python** 构建的轻量级、高性能 C/C++ 语言服务器（Language Server Protocol, LSP），并提供原生的 VS Code 插件支持。
 
 与原生 `clangd` 相比，PyClangd 创新性地引入了 **SQLite 持久化索引**，旨在解决超大型 C/C++ 代码库（如 Linux 内核源码）在解析和跳转时面临的内存占用过大、全量索引慢等痛点，提供 **100% 确定且精准** 的代码分析与跨文件跳转能力。
 
