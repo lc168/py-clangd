@@ -67,7 +67,7 @@ pip install -r requirements.txt
 ### 4. 在 VS Code 中配置与使用
 
 1. 按下 `F5` 或通过 VS Code 的 **Run and Debug** 面板运行。这会启动一个新的 "扩展开发宿主" 窗口。
-2. 在新窗口的设置（Settings）中搜索 `pyclangd.libraryPath` 参数，指向您环境中的 libclang 库目录。例如：`/home/lc/llvm22/lib`。
+2. 在新窗口的设置（Settings）中搜索 `pyclangd.libraryPath` 参数，指向您环境中的 libclang 库目录。例如：`/home/lc/llvm23/lib`。
 3. 打开任意包含 `compile_commands.json` 的标准 C/C++ 项目，即可享受低内存、高精度的代码跳转与引用查询体验！
 
 ### (可选) 后端独立运行模式
@@ -76,7 +76,7 @@ pip install -r requirements.txt
 
 ```bash
 # 以当前目录为工作区启动后端引擎，使用16线程并发建库 
-./venv/bin/python3 ./server/pyclangd_server.py -d ./ -l /home/lc/llvm22/lib -j 16
+./venv/bin/python3 ./server/pyclangd_server.py -d ./ -l /home/lc/llvm23/lib -j 16
 ```
 
 ## 🎯 愿景与设计理念

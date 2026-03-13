@@ -63,11 +63,11 @@ if __name__ == "__main__":
     # 解析你给的 clang -E 例子中的第 6 行和第 7 行
     print("----- 测试提取 z -----")
     # 注意：在原始的 test_macro.c 里，"int z = MAX..." 这行在第 6 行
-    res1 = get_macro_expansion("test_macro.c", 19, clang_bin="/home/lc/llvm22/bin/clang-22")
+    res1 = get_macro_expansion("test_macro.c", 19, clang_bin="/home/lc/llvm23/bin/clang-23")
     print(res1)
     
     print("\n----- 测试提取 z1 -----")
     # "int z1 = MAX..." 这行在第 7 行
-    res2 = get_macro_expansion("test_macro.c", 26, clang_bin="/home/lc/llvm22/bin/clang-22")
+    res2 = get_macro_expansion("test_macro.c", 26, clang_bin="/home/lc/llvm23/bin/clang-23")
     print(res2)
 

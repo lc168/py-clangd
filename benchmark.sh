@@ -3,7 +3,7 @@
 # 配置路径
 PYTHON_BIN="/home/lc/sda/work/py-clangd/venv/bin/python3"
 SERVER_PATH="/home/lc/sda/work/py-clangd/server/pyclangd_server.py"
-LIB_PATH="/home/lc/llvm22/lib"
+LIB_PATH="/home/lc/llvm23/lib"
 KERNEL_DIR="/home/lc/fg_kernel/linux-6.6.127"
 RESULTS_FILE="/home/lc/sda/work/py-clangd/benchmark_results.txt"
 

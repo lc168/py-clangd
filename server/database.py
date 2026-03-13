@@ -409,7 +409,7 @@ class Database:
         elif 'arm' in compiler_path:
             compiler_args.append('--target=arm-linux-gnueabihf')
 
-        builtin_includes = '/home/lc/llvm22/lib/clang/22/include'  #mymark 这里需要规范一下，不能依赖固定的系统文件
+        builtin_includes = '/home/lc/llvm23/lib/clang/23/include'  #mymark 这里需要规范一下，不能依赖固定的系统文件
         compiler_args.extend(['-isystem', builtin_includes])  #mymark这里需要梳理一下是否会有冲突导致问题
         return compiler_args
 
