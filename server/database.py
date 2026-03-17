@@ -17,6 +17,10 @@ import random
 import functools
 import logging
 import clang_init
+import shlex
+from cindex import Index, CursorKind
+import json
+import multiprocessing
 
 # 配置日志
 logging.basicConfig(
@@ -245,12 +249,12 @@ class Database:
         # py_clangd 增加 compile_commands.json文件 的参数
         # 现在看移动目录执行编译命令是必须的，
         logger.info(f"bug!开始编译更新: {file_path}")
-        return
+        
         cmd_info = self.commands_map.get(file_path)
         if not cmd_info:
             logger.error(f"没有找到编译命令: {file_path}")
             return
-        status = self.index_worker((cmd_info, self.workspace_dir))
+        status, _ = self.index_worker((cmd_info, self.workspace_dir))
         if status == "SUCCESS":
             logger.info(f"✅ 更新成功: {os.path.basename(file_path)}")
         else:
@@ -357,14 +361,25 @@ class Database:
         ''', (name,))
         return self.cursor.fetchall()
 
+
     # =========================================================================
     # --- 构建索引与解析体系 (从原来的 pyclangd_server 中抽取) ---
     # =========================================================================
 
     @staticmethod
-    def _clean_compiler_args(raw_args, directory, source_file=None):#mymark 这里参数需要裁剪一下
+    def _clean_compiler_args(cmd_info):#mymark 这里参数需要裁剪一下
+
+        directory = cmd_info.get('directory', '')
+        file_rel = cmd_info.get('file', '')
+        source_file = os.path.realpath(os.path.join(directory, file_rel)) 
+
+        raw_args = cmd_info.get('arguments')
+        if not raw_args:
+            command_str = cmd_info.get('command', '')
+            if command_str: raw_args = shlex.split(command_str)
+            else: raw_args = []
+
         """清洗并组装传递给 libclang 的编译参数"""
-        import os
         compiler_args = []
         skip_next = False
         source_basename = os.path.basename(source_file) if source_file else ""
@@ -411,35 +426,13 @@ class Database:
 
         builtin_includes = '/home/lc/llvm23/lib/clang/23/include'  #mymark 这里需要规范一下，不能依赖固定的系统文件
         compiler_args.extend(['-isystem', builtin_includes])  #mymark这里需要梳理一下是否会有冲突导致问题
-        return compiler_args
+        return source_file, compiler_args
 
     @staticmethod
-    def index_worker(args):
-        """核心解析工人进程：为了支持多进程，必须为静态方法"""
-        import os, shlex
-        from cindex import Index, CursorKind
-        # mymark 参数清洗这里好好修改一下
-        cmd_info, workspace_dir = args
-        
-        directory = cmd_info.get('directory', '')
-        file_rel = cmd_info.get('file', '')
-        source_file = os.path.realpath(os.path.join(directory, file_rel)) 
-
-        raw_args = cmd_info.get('arguments')
-        if not raw_args:
-            command_str = cmd_info.get('command', '')
-            if command_str: raw_args = shlex.split(command_str)
-            else: raw_args = []
-        
-        compiler_args = Database._clean_compiler_args(raw_args, directory, source_file)
-
+    def index_parse(source_file, compiler_args):
         idx = Index.create()
-        mtime = 0
         try:
-            # 获取文件最后修改时间
-            mtime = os.path.getmtime(source_file)
             tu = idx.parse(source_file, args=compiler_args, options=0x01)
-
             for diag in tu.diagnostics:
                 if diag.severity >= 3:
                     logger.warning(f"编译报错 [{source_file}]:args={compiler_args}")
@@ -447,7 +440,7 @@ class Database:
                     break
         except Exception as e:
             logger.error(f"libclang 解析崩溃 [{source_file}]: {e}")
-            return ("FAILED", source_file)
+            return ("FAILED", [])
 
         symbols_to_upsert = []
         refs_to_insert = []
@@ -472,8 +465,10 @@ class Database:
             loc = node.location
             spelling_file = loc.spelling_file
             raw_file_name = spelling_file.name if spelling_file else loc.file.name
-            s_line = loc.spelling_line
-            s_col = loc.spelling_column
+            # s_line = loc.spelling_line
+            # s_col = loc.spelling_column
+            s_line = loc.line
+            s_col = loc.column
 
             # --- 优化点 1：缓存文件路径解析 ---尽量减少高耗时的os.path.realpath调用
             if raw_file_name == last_raw_file_name:
@@ -552,17 +547,33 @@ class Database:
                continue
             logger.info(f"{os.path.basename(realpath_file_name)}|{s_line}|{s_col}|{s_line}|{s_col+len(name)}|usr={usr}|xxx|sp={node.spelling}|{kind.name}|ref_usr=[{ref_usr}]")
 
-        # 实例化专属进程的 DB 防止锁冲突
-        db = Database(workspace_dir)
-        # 保存解析结果到数据库
-        db.save_parse_result(source_file, mtime, symbols_to_upsert)
-        db.close()
-        
-        return ("SUCCESS", source_file)
+        return ("SUCCESS", symbols_to_upsert)
+
+
+    @staticmethod
+    def index_worker(cmd_info):
+        """核心解析工人进程：为了支持多进程，必须为静态方法"""
+        source_file, compiler_args = Database._clean_compiler_args(cmd_info)
+
+        # 获取文件最后修改时间,为了保存到数据库，下次发现文件没有修改，就可以不再编译
+        mtime = os.path.getmtime(source_file)
+        # 编译分析数据
+        status,symbols_to_upsert = Database.index_parse(source_file, compiler_args)
+       
+        if status == "FAILED":
+            return ("FAILED", source_file)
+        else:
+            # 实例化专属进程的 DB 防止锁冲突
+            db = Database(cmd_info.get('directory', ''))
+            # 保存解析结果到数据库
+            db.save_parse_result(source_file, mtime, symbols_to_upsert)
+            db.close()
+            return ("SUCCESS", source_file)
+   
 
     def run_index_mode(self, jobs):
         """主动索引模式（带增量更新与断点续传）"""
-        import os, json, multiprocessing
+
         from concurrent.futures import ProcessPoolExecutor, as_completed
         
         workspace_dir = self.workspace_dir
@@ -598,8 +609,8 @@ class Database:
             if abs_path in indexed_files and indexed_files[abs_path] >= mtime:
                 logger.info(f"文件 {abs_path} 已是最新状态，无需合并解析！")
                 continue
-                
-            tasks.append((cmd, workspace_dir))
+
+            tasks.append(cmd)
             # 标记为 indexing 中状态
             self.update_file_status(abs_path, mtime, 'indexing', commit=False)
 
