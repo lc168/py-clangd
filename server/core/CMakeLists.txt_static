@@ -1,0 +1,47 @@
+cmake_minimum_required(VERSION 3.15)
+project(PyClangd-Core)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 1. 基础路径配置
+set(LLVM_INSTALL_DIR "/home/lc/llvm23") #
+list(APPEND CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}")
+
+find_package(LLVM REQUIRED CONFIG)
+find_package(Clang REQUIRED CONFIG)
+
+include_directories(${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+add_definitions(${LLVM_DEFINITIONS} ${CLANG_DEFINITIONS})
+
+# 同步 RTTI 状态（静态链接必须完全匹配）
+if(NOT LLVM_ENABLE_RTTI)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
+endif()
+
+add_executable(PyClangd-Core main.cpp)
+
+# 2. 【核心修改】静态链接列表
+# 移除 clang-cpp，手动添加 Clang 的各个功能模块
+target_link_libraries(PyClangd-Core
+    PRIVATE
+    # --- Clang 静态库 (注意顺序，从高层到底层) ---
+    clangTooling
+    clangFrontend
+    clangSerialization
+    clangParse
+    clangSema
+    clangAST
+    clangLex
+    clangBasic
+    
+    # --- LLVM 静态库全家桶 ---
+    ${LLVM_AVAILABLE_LIBS} #
+    
+    # --- 系统必备依赖 ---
+    pthread
+    dl
+    z
+    m
+    rt
+)
