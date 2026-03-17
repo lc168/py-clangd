@@ -1,15 +1,18 @@
+#include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/PPCallbacks.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include <iostream>
+#include <string>
 
 using namespace clang;
 using namespace clang::tooling;
 
-// 1. 宏探针：专门处理预处理阶段
+// --- 1. 宏探针：抓取预处理信息 ---
 class IndexerPPCallbacks : public PPCallbacks {
     SourceManager &SM;
 public:
@@ -17,37 +20,56 @@ public:
 
     void MacroDefined(const Token &MacroNameTok, const MacroDirective *MD) override {
         if (SM.isInSystemHeader(MacroNameTok.getLocation())) return;
-        
-        std::string Name = MacroNameTok.getIdentifierInfo()->getName().str();
-        SourceLocation Loc = MacroNameTok.getLocation();
-        PresumedLoc PLoc = SM.getPresumedLoc(Loc);
 
-        // 输出格式可以自定义，方便 Python 解析
-        std::cout << "SYMBOL|MACRO|" << Name << "|" 
-                  << PLoc.getFilename() << "|" << PLoc.getLine() << "\n";
+        std::string Name = MacroNameTok.getIdentifierInfo()->getName().str();
+        PresumedLoc PLoc = SM.getPresumedLoc(MacroNameTok.getLocation());
+
+        // 输出 JSON 格式
+        std::cout << "{\"kind\":\"MACRO\", \"name\":\"" << Name 
+                  << "\", \"file\":\"" << PLoc.getFilename() 
+                  << "\", \"line\":" << PLoc.getLine() << "}" << std::endl;
     }
 };
 
-// 2. AST 探针：处理变量和函数声明
+// --- 2. AST 探针：抓取变量和结构体偏移量 ---
 class IndexerVisitor : public RecursiveASTVisitor<IndexerVisitor> {
     ASTContext &Context;
 public:
     explicit IndexerVisitor(ASTContext &Context) : Context(Context) {}
 
+    // 处理结构体成员 (Field)
+    bool VisitFieldDecl(FieldDecl *F) {
+        if (Context.getSourceManager().isInSystemHeader(F->getLocation())) return true;
+
+        const RecordDecl *Record = F->getParent();
+        const ASTRecordLayout &Layout = Context.getASTRecordLayout(Record);
+        
+        // 计算字节偏移量
+        uint64_t OffsetBytes = Layout.getFieldOffset(F->getFieldIndex()) / 8;
+        PresumedLoc PLoc = Context.getSourceManager().getPresumedLoc(F->getLocation());
+
+        std::cout << "{\"kind\":\"FIELD\", \"name\":\"" << F->getNameAsString() 
+                  << "\", \"struct\":\"" << Record->getNameAsString()
+                  << "\", \"type\":\"" << F->getType().getAsString()
+                  << "\", \"offset\":" << OffsetBytes
+                  << ", \"line\":" << PLoc.getLine() << "}" << std::endl;
+        return true;
+    }
+
+    // 处理全局/局部变量
     bool VisitVarDecl(VarDecl *D) {
         if (Context.getSourceManager().isInSystemHeader(D->getLocation())) return true;
+        if (isa<ParmVarDecl>(D)) return true; // 忽略函数参数
 
-        std::string Name = D->getNameAsString();
-        std::string Type = D->getType().getAsString();
-        // LLVM 23 获取 USR 的标准方式
-        // 这里可以调用生成 USR 的辅助函数
-        
-        std::cout << "SYMBOL|VAR|" << Name << "|" << Type << "\n";
+        PresumedLoc PLoc = Context.getSourceManager().getPresumedLoc(D->getLocation());
+        std::cout << "{\"kind\":\"VAR\", \"name\":\"" << D->getNameAsString() 
+                  << "\", \"type\":\"" << D->getType().getAsString()
+                  << "\", \"line\":" << PLoc.getLine() << "}" << std::endl;
         return true;
     }
 };
 
-// 3. 逻辑封装
+// --- 3. 逻辑封装 (插槽连接器) ---
 class IndexerConsumer : public ASTConsumer {
     IndexerVisitor Visitor;
 public:
@@ -60,10 +82,8 @@ public:
 class IndexerAction : public ASTFrontendAction {
 protected:
     void ExecuteAction() override {
-        // 在此处挂载 PPCallbacks
         getCompilerInstance().getPreprocessor().addPPCallbacks(
             std::make_unique<IndexerPPCallbacks>(getCompilerInstance().getSourceManager()));
-        
         ASTFrontendAction::ExecuteAction();
     }
 
@@ -72,8 +92,8 @@ protected:
     }
 };
 
-// 4. 入口函数
-static llvm::cl::OptionCategory MyToolCategory("clang-indexer options");
+// --- 4. 入口函数 ---
+static llvm::cl::OptionCategory MyToolCategory("./PyClangd-Core xx.c -- -I./include");
 
 int main(int argc, const char **argv) {
     auto ExpectedParser = CommonOptionsParser::create(argc, argv, MyToolCategory);
