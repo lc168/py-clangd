@@ -52,41 +52,53 @@ class IndexerVisitor : public RecursiveASTVisitor<IndexerVisitor> {
 public:
     explicit IndexerVisitor(ASTContext &Context) : Context(Context) {}
 
-    // VisitNamedDecl 是一个“大网”，能抓到变量、函数、枚举、结构体名等
+    // --- A. 抓取定义 (原有逻辑) ---
     bool VisitNamedDecl(NamedDecl *D) {
-        // 1. 过滤掉系统头文件
+        if (Context.getSourceManager().isInSystemHeader(D->getLocation())) return true;
+        outputSymbol(D, "DECL", D->getLocation());
+        return true;
+    }
+
+    // --- B. 【新增】抓取引用 (解决 test_func 在宏里被调用的问题) ---
+    bool VisitDeclRefExpr(DeclRefExpr *E) {
+        NamedDecl *D = E->getFoundDecl();
         if (Context.getSourceManager().isInSystemHeader(D->getLocation())) return true;
 
-        // 2. 获取名字
+        // 关键点：对于宏内部的引用，获取它在主文件中的“展开位置”
+        SourceLocation Loc = E->getLocation();
+        if (Loc.isMacroID()) {
+            // 将位置“拉”回到宏被调用的那一行（比如第 12 行）
+            Loc = Context.getSourceManager().getFileLoc(Loc);
+        }
+
+        outputSymbol(D, "REF", Loc);
+        return true;
+    }
+
+private:
+    void outputSymbol(NamedDecl *D, const std::string &kindPrefix, SourceLocation Loc) {
+        SourceManager &SM = Context.getSourceManager();
+        if (SM.isInSystemHeader(Loc)) return;
+
         std::string Name = D->getNameAsString();
+        PresumedLoc PLoc = SM.getPresumedLoc(Loc);
+        if (PLoc.isInvalid()) return;
 
-        // 3. 获取位置 (文件:行:列)
-        FullSourceLoc FullLocation = Context.getFullLoc(D->getLocation());
-        if (!FullLocation.isValid()) return true;
-        
-        std::string FileName = Context.getSourceManager().getFilename(D->getLocation()).str();
-        unsigned Line = FullLocation.getSpellingLineNumber();
-
-        // 4. 获取 USR (这是你 Python 代码里最核心的东西)
         llvm::SmallString<128> USR;
-        if (index::generateUSRForDecl(D, USR)) return true; // 生成失败则跳过
+        index::generateUSRForDecl(D, USR);
 
-        // 5. 获取类型 (如果它有类型的话)
         std::string Type = "None";
         if (ValueDecl *VD = dyn_cast<ValueDecl>(D)) {
             Type = VD->getType().getAsString();
         }
 
-        // 输出 JSON，方便 Python 后台处理
         std::cout << "{"
-                  << "\"kind\":\"" << D->getDeclKindName() << "\", "
+                  << "\"kind\":\"" << kindPrefix << "_" << D->getDeclKindName() << "\", "
                   << "\"name\":\"" << Name << "\", "
                   << "\"usr\":\"" << USR.c_str() << "\", "
                   << "\"type\":\"" << Type << "\", "
-                  << "\"line\":" << Line << "," << FullLocation.getSpellingColumnNumber()
+                  << "\"line\":" << PLoc.getLine() << ", \"col\":" << PLoc.getColumn()
                   << "}" << std::endl;
- //<< "\"file\":\"" << FileName << "\", "
-        return true;
     }
 };
 
