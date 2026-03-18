@@ -16,6 +16,7 @@ import time
 import random
 import functools
 import logging
+import subprocess
 import clang_init
 import shlex
 from cindex import Index, CursorKind
@@ -52,22 +53,27 @@ def with_retry(base_delay=0.05):
     return decorator
 
 class Database:
-    def __init__(self, workspace_dir):
-        self.workspace_dir = os.path.abspath(workspace_dir)
+    _workspace_dir = None
+    _core_bin_path = None
+
+    def __init__(self, workspace_dir = None):
+        # 如果传入了路径，就更新全局配置
+        if workspace_dir:
+            Database._workspace_dir = os.path.abspath(workspace_dir)
+            # 自动推导核心二进制路径
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            Database._core_bin_path = os.path.join(script_dir, "core/build/PyClangd-Core")
+
+        if not Database._workspace_dir:
+            raise ValueError("❌ 错误：Database 尚未初始化 workspace_dir！请在程序入口处先调用 Database(path)")
+
+        self.workspace_dir = Database._workspace_dir
         self.db_path = os.path.join(self.workspace_dir, "pyclangd_index.db")
-        self.commands_map = {}
         
-        # 核心优化 1：isolation_level="IMMEDIATE" 
         self.conn = sqlite3.connect(self.db_path, timeout=60.0, check_same_thread=False, isolation_level="IMMEDIATE")
         self.cursor = self.conn.cursor()
-        
-        # 核心优化 2：并发 SQLite 的性能地基
-        # WAL (Write-Ahead Logging) 允许多个读操作和一个写操作并发进行
         self.conn.execute('PRAGMA journal_mode=WAL;')
         self.conn.execute('PRAGMA synchronous=NORMAL;')
-        self.conn.execute('PRAGMA busy_timeout=60000;') # 当数据库被锁定时，内部自动等待最多 60 秒再报错
-
-        # 让所有进程都能按需自动建表（安全起见）
         self._setup()
 
     @with_retry()
@@ -428,148 +434,91 @@ class Database:
         compiler_args.extend(['-isystem', builtin_includes])  #mymark这里需要梳理一下是否会有冲突导致问题
         return source_file, compiler_args
 
+    # 需求2：调用 C++ 核心进行解析
     @staticmethod
-    def index_parse(source_file, compiler_args):
-        idx = Index.create()
-        try:
-            tu = idx.parse(source_file, args=compiler_args, options=0x01)
-            for diag in tu.diagnostics:
-                if diag.severity >= 3:
-                    logger.warning(f"编译报错 [{source_file}]:args={compiler_args}")
-                    logger.warning(f"  ↳ {diag.spelling}")
-                    break
-        except Exception as e:
-            logger.error(f"libclang 解析崩溃 [{source_file}]: {e}")
-            return ("FAILED", [])
+    def index_parse_cpp(source_file, compiler_args):
+        """调用 PyClangd-Core 替代 libclang python 绑定"""
+        if not Database._core_bin_path or not os.path.exists(Database._core_bin_path):
+            logger.error(f"找不到核心程序: {Database._core_bin_path}")
+            return "FAILED", []
+
+        # 构造命令: ./PyClangd-Core source.c -- args...
+        cmd = [Database._core_bin_path, source_file, "--"] + compiler_args
+        
+        # 动态编译版需要设置动态库搜索路径
+        env = os.environ.copy()
+        env["LD_LIBRARY_PATH"] = "/home/lc/llvm23/lib:" + env.get("LD_LIBRARY_PATH", "")
 
         symbols_to_upsert = []
-        refs_to_insert = []
-        
-        # 优化：路径缓存，大幅减少 os.path.realpath 调用
-        last_raw_file_name = None
-        last_realpath_file_name = None
+        try:
+            # 执行并获取输出
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
 
-        kind_def = (CursorKind.MACRO_DEFINITION,
-                    CursorKind.FUNCTION_DECL,
-                    CursorKind.VAR_DECL)
-
-        # 遍历 AST 节点
-        for node in tu.cursor.walk_preorder():
-
-            if not node.location.file:
-                continue  #跳过没有文件的节点
-
-            # --- 核心修复：使用拼写位置 (Spelling Location) ---
-            # 对于宏展开中的节点，node.location 指向宏调用起始位置，
-            # 而 spelling location 指向源码中实际书写该标识符的位置。
-            loc = node.location
-            spelling_file = loc.spelling_file
-            raw_file_name = spelling_file.name if spelling_file else loc.file.name
-            # s_line = loc.spelling_line
-            # s_col = loc.spelling_column
-            s_line = loc.line
-            s_col = loc.column
-
-            # --- 优化点 1：缓存文件路径解析 ---尽量减少高耗时的os.path.realpath调用
-            if raw_file_name == last_raw_file_name:
-                realpath_file_name = last_realpath_file_name
-            else:
-                realpath_file_name = os.path.realpath(raw_file_name)
-                last_raw_file_name = raw_file_name
-                last_realpath_file_name = realpath_file_name
+            # 读取输出
+            stdout_data, stderr_data = process.communicate()
             
-            # --- 优化点 2：减少 node.kind 获取次数 ---
-            kind = node.kind
-            
-            # --- 角色 A: 提取定义 (Definitions) ---
-            is_def = node.is_definition()
-            if not is_def and kind == CursorKind.VAR_DECL:
-                # 兼容 tentative definitions (例如 void *initial_boot_params; 这种没有初始化器的全局变量)
-                # 这种变量 is_definition() 为 False，但没有 extern，应作为定义保存。
-                if node.storage_class.name != 'EXTERN':
-                    is_def = True
+            if process.returncode != 0:
+                # 打印出具体的错误原因，方便我们定位是少了头文件还是参数不对
+                logger.error(f"❌ C++ 核心解析失败 [{os.path.basename(source_file)}]:\n{stderr_data}")
+                return "FAILED", stderr_data    
 
-            if is_def or kind == CursorKind.MACRO_DEFINITION:
+            for line in stdout_data.splitlines():
+                line = line.strip()
+                if not line.startswith('{'): continue
                 
-                usr = node.get_usr()
-                if usr:
-                    name = node.spelling or ""
-                    symbols_to_upsert.append((realpath_file_name,
-                                             s_line, s_col, s_line, s_col+len(name),
-                                             usr, "def", name, kind.name))
-                    continue
+                try:
+                    data = json.loads(line)
+                    # 将 C++ JSON 映射回 Python 数据库元组
+                    # C++ 输出包含: kind, name, usr, line, col, file(可选)
+                    kind_raw = data.get("kind", "")
+                    # 简单拆分角色(DEF/REF)和类型
+                    role = "def" if "DEF" in kind_raw else "ref"
+                    if "MACRO_USE" in kind_raw: role = "ref" # 适配宏展开
+                    
+                    # 统一文件路径
+                    f_path = data.get("file", source_file)
+                    name = data.get("name", "")
+                    s_line = data.get("line", 0)
+                    s_col = data.get("col", 0)
+                    
+                    # 组合成存储格式
+                    symbols_to_upsert.append((
+                        f_path, s_line, s_col, s_line, s_col + len(name),
+                        data.get("usr", f"macro_{name}"), # 宏没有USR时用名字占位
+                        role, name, kind_raw
+                    ))
+                except Exception as e:
+                    logger.warning(f"解析 JSON 行失败: {line}, error: {e}")
 
+            process.wait()
+            if process.returncode != 0:
+                logger.error(f"PyClangd-Core 返回异常状态码: {process.returncode}")
+                return "FAILED", []
 
-            # --- 提取 include 引用 ---
-            if kind == CursorKind.INCLUSION_DIRECTIVE:
-                exact_path = node.spelling
-                if exact_path:
-                    inc_file = node.get_included_file()
-                    if inc_file and inc_file.name:
-                        inc_path = os.path.realpath(inc_file.name)
-                        symbols_to_upsert.append((realpath_file_name, 
-                                                 s_line, s_col, s_line, s_col+len(inc_path),
-                                                 inc_path, "inc", os.path.basename(inc_path), "INCLUSION_DIRECTIVE"))
-                        continue
+            return "SUCCESS", symbols_to_upsert
 
-            # --- 角色 B: 提取引用 (References) ---
-            #mymark 这个判断还有必要吗？
-            is_ref_node = (
-                kind.is_declaration() or
-                kind.is_reference() or
-                kind in (
-                    CursorKind.DECL_REF_EXPR, 
-                    CursorKind.MEMBER_REF_EXPR, 
-                    CursorKind.MACRO_INSTANTIATION,
-                    CursorKind.CALL_EXPR
-                )
-            )
-
-            if is_ref_node:
-                callee = node.referenced
-                if callee:
-                    usr = callee.get_usr()
-                    if usr:
-                        target_name = callee.spelling or ""
-                        name = node.spelling or target_name or ""
-                        symbols_to_upsert.append((realpath_file_name, 
-                                                 s_line, s_col, s_line, s_col+len(name),
-                                                 usr, "ref", name, callee.kind.name))
-                        continue
-            
-            # 调试专用
-            name = node.spelling or ""
-            usr = node.get_usr()
-            ref_usr = node.referenced.get_usr() if node.referenced else 'None'
-            if usr == "" and (ref_usr == "None" or ref_usr == ""):
-               continue
-            if kind == CursorKind.UNEXPOSED_EXPR:
-               continue
-            logger.info(f"{os.path.basename(realpath_file_name)}|{s_line}|{s_col}|{s_line}|{s_col+len(name)}|usr={usr}|xxx|sp={node.spelling}|{kind.name}|ref_usr=[{ref_usr}]")
-
-        return ("SUCCESS", symbols_to_upsert)
-
+        except Exception as e:
+            logger.exception(f"执行 PyClangd-Core 崩溃: {e}")
+            return "FAILED", []
 
     @staticmethod
     def index_worker(cmd_info):
-        """核心解析工人进程：为了支持多进程，必须为静态方法"""
+        """核心解析工人进程"""
+        # 注意：这里需要确保 Database._core_bin_path 已在主进程设置
         source_file, compiler_args = Database._clean_compiler_args(cmd_info)
-
-        # 获取文件最后修改时间,为了保存到数据库，下次发现文件没有修改，就可以不再编译
         mtime = os.path.getmtime(source_file)
-        # 编译分析数据
-        status,symbols_to_upsert = Database.index_parse(source_file, compiler_args)
-       
+        
+        # 使用 C++ 核心进行解析
+        status, symbols = Database.index_parse_cpp(source_file, compiler_args)
+
         if status == "FAILED":
-            return ("FAILED", source_file)
+            return "FAILED", source_file
         else:
-            # 实例化专属进程的 DB 防止锁冲突
-            db = Database(cmd_info.get('directory', ''))
-            # 保存解析结果到数据库
-            db.save_parse_result(source_file, mtime, symbols_to_upsert)
+            # 需求1：使用无参初始化（前提是主进程已初始化过）
+            db = Database() 
+            db.save_parse_result(source_file, mtime, symbols)
             db.close()
-            return ("SUCCESS", source_file)
-   
+            return "SUCCESS", source_file
 
     def run_index_mode(self, jobs):
         """主动索引模式（带增量更新与断点续传）"""
