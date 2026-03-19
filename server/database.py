@@ -55,6 +55,8 @@ def with_retry(base_delay=0.05):
 class Database:
     _workspace_dir = None
     _core_bin_path = None
+    _clang_include_path = None
+    _clang_lib_path = None
 
     def __init__(self, workspace_dir = None):
         # 如果传入了路径，就更新全局配置
@@ -63,6 +65,8 @@ class Database:
             # 自动推导核心二进制路径
             script_dir = os.path.dirname(os.path.abspath(__file__))
             Database._core_bin_path = os.path.join(script_dir, "core/build/PyClangd-Core")
+            Database._clang_include_path = os.path.join(script_dir, "clang_include/")
+            Database._clang_lib_path = os.path.join(script_dir, "clang_libs/")
 
         if not Database._workspace_dir:
             raise ValueError("❌ 错误：Database 尚未初始化 workspace_dir！请在程序入口处先调用 Database(path)")
@@ -415,7 +419,7 @@ class Database:
             compiler_args.append(arg)
 
         # mymark 先手动添加参数，以后优化
-        compiler_args.extend(['-I', '/home/lc/llvm23/lib/clang/23/include'])
+        compiler_args.extend(['-I', Database._clang_include_path])
         # compiler_args.append('--target=aarch64-linux-gnu')
 
         #print("清洗并组装传递给 libclang 的编译参数:", compiler_args)
@@ -434,13 +438,12 @@ class Database:
         
         # 动态编译版需要设置动态库搜索路径 #mymark 待修改
         env = os.environ.copy()
-        env["LD_LIBRARY_PATH"] = "/home/lc/llvm23/lib:" + env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = Database._clang_lib_path + ":" + env.get("LD_LIBRARY_PATH", "")
 
         symbols_to_upsert = []
         try:
             # 执行并获取输出
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-
             # 读取输出
             stdout_data, stderr_data = process.communicate()
             
