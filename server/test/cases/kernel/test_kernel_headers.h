@@ -18,10 +18,10 @@ struct wait_queue_head { int lock; };
 #define DECLARE_WAIT_QUEUE_HEAD(name) struct wait_queue_head name 
 struct nested_dev { struct { int dev_id; } info; }; // @def: ns_dev_id:dev_id
 
-#define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
+#define offsetof2(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
 #define container_of(ptr, type, member) ({ /* @def: container_of */ \
     const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
-    (type *)( (char *)__mptr - offsetof(type,member) );})
+    (type *)( (char *)__mptr - offsetof2(type,member) );})
 
 struct list_head { struct list_head *next, *prev; }; // @def: list_head_next:next
 #define list_entry(ptr, type, member) container_of(ptr, type, member) // @def: list_entry

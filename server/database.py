@@ -214,30 +214,24 @@ class Database:
         self.cursor.execute('''
             SELECT role, usr FROM symbols
             WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
-            ORDER BY
-                (CASE WHEN kind = 'MACRO_DEFINITION' THEN 0 ELSE 1 END),
-                (CASE WHEN role = 'def' THEN 0 ELSE 1 END),
-                (e_col - s_col) ASC LIMIT 1''', (file_path, line, col, col))
+            ''', (file_path, line, col, col))
         res = self.cursor.fetchone()
-        logger.info(f"find usr res: {res}")
+        logger.info(f"find usr: {res}")
         if not res:
+            logger.info(f"没有找到:{file_path}:{line}:{col}的usr")
             return []
         role, target_str = res
         if role == 'inc':
+            logger.info(f"找到头文件: {target_str}")
             # 头文件路径直接就存在了 target_str 中
-            import os
-            if os.path.exists(target_str):
-                return [(target_str, 1, 1, 1, 1)]
-            return []
-
+            return [(target_str, 1, 1, 1, 1)]
         elif role in ('ref', 'def'):
             # 无论是引用处按 F12，还是定义处自己按 F12，统统拿着 USR 去找它的 def 记录
-            sqlcmd = '''
-                SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
-                FROM symbols 
+            self.cursor.execute('''
+                SELECT file_path, s_line, s_col, e_line, e_col 
+                FROM symbols
                 WHERE usr = ? AND role = 'def'
-            '''
-            self.cursor.execute(sqlcmd, (target_str,))
+            ''', (target_str,))
             res = self.cursor.fetchall()
             logger.info(f"find def: {res}")
             return res
@@ -449,8 +443,15 @@ class Database:
                     # C++ 输出包含: kind, name, usr, line, col, file(可选)
                     kind_raw = data.get("kind", "")
                     # 简单拆分角色(DEF/REF)和类型
-                    role = "def" if "DEF" in kind_raw else "ref"
-                    if "MACRO_USE" in kind_raw: role = "ref" # 适配宏展开
+                    if "DEF" in kind_raw:
+                        role = "def" # 变量定义
+                    else:
+                        role = "ref" # 变量引用
+
+                    if "MACRO_USE" in kind_raw:
+                        role = "ref" # 宏展开
+                    if "MACRO_DEF" in kind_raw:
+                        role = "def" # 宏定义
                     
                     # 统一文件路径
                     f_path = data.get("file", source_file)

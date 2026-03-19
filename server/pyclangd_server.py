@@ -130,7 +130,7 @@ def lsp_definition(server: PyClangdServer, params):
     line_1 = line_0 + 1
     col_1 = col_0 + 1
     
-    logger.info(f"👉 发起跳转: {file_path} 行{line_1} 列{col_1}")
+    logger.info(f"👉 发起跳转: {file_path}:{line_1}:{col_1}")
     
     if not server.db:
         return None
