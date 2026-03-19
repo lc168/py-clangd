@@ -28,38 +28,54 @@ class IndexerPPCallbacks : public PPCallbacks {
     SourceManager &SM;
 public:
     explicit IndexerPPCallbacks(SourceManager &SM) : SM(SM) {}
+
+    // 1. 处理 #define
     void MacroDefined(const Token &MacroNameTok, const MacroDirective *MD) override {
         if (SM.isInSystemHeader(MacroNameTok.getLocation())) return;
         PresumedLoc PLoc = SM.getPresumedLoc(MacroNameTok.getLocation());
+        if (!PLoc.isValid()) return;
         std::string macroUsr = std::string("c:") + PLoc.getFilename() + "@" + MacroNameTok.getIdentifierInfo()->getName().str();
         emitJson("MACRO_DEF", MacroNameTok.getIdentifierInfo()->getName().str(), macroUsr, PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
     }
+
+    // 2. 处理普通的宏展开
     void MacroExpands(const Token &MacroNameTok, const MacroDefinition &MD, SourceRange Range, const MacroArgs *Args) override {
-        // 1. 获取宏“使用处”的位置
-        SourceLocation UseLoc = SM.getSpellingLoc(Range.getBegin());
+        handleMacroReference(MacroNameTok, MD);
+    }
+
+    // 3. --- 新增：处理 #ifdef ---
+    void Ifdef(SourceLocation Loc, const Token &MacroNameTok, const MacroDefinition &MD) override {
+        handleMacroReference(MacroNameTok, MD);
+    }
+
+    // 4. --- 新增：处理 #ifndef ---
+    void Ifndef(SourceLocation Loc, const Token &MacroNameTok, const MacroDefinition &MD) override {
+        handleMacroReference(MacroNameTok, MD);
+    }
+
+    // 5. --- 新增：处理 #if defined(MY_MACRO) ---
+    void Defined(const Token &MacroNameTok, const MacroDefinition &MD, SourceRange Range) override {
+        handleMacroReference(MacroNameTok, MD);
+    }
+
+private:
+    // 统一处理宏引用的逻辑，确保 USR 逻辑与之前“锚定定义处”的策略一致
+    void handleMacroReference(const Token &MacroNameTok, const MacroDefinition &MD) {
+        SourceLocation UseLoc = SM.getSpellingLoc(MacroNameTok.getLocation());
         if (SM.isInSystemHeader(UseLoc)) return;
         PresumedLoc PUseLoc = SM.getPresumedLoc(UseLoc);
-        if (!PUseLoc.isValid()) return; // 再次保险
+        if (!PUseLoc.isValid()) return;
 
-        // 2. 安全地获取宏“定义处”的位置
         std::string defFile = "<builtin>";
-        const MacroInfo *MI = MD.getMacroInfo();
-        
-        if (MI) {
+        if (const MacroInfo *MI = MD.getMacroInfo()) {
             SourceLocation DefLoc = MI->getDefinitionLoc();
-            // 关键修复：只有位置合法且不是在命令行/内置定义时，才去取文件名
             if (DefLoc.isValid() && !SM.isWrittenInBuiltinFile(DefLoc) && !SM.isWrittenInCommandLineFile(DefLoc)) {
                 PresumedLoc PDefLoc = SM.getPresumedLoc(DefLoc);
-                if (PDefLoc.isValid()) {
-                    defFile = PDefLoc.getFilename();
-                }
+                if (PDefLoc.isValid()) defFile = PDefLoc.getFilename();
             }
         }
 
-        // 3. 构造唯一的 macroUsr
         std::string macroUsr = std::string("c:") + defFile + "@" + MacroNameTok.getIdentifierInfo()->getName().str();
-
-        // 4. 发射 JSON
         emitJson("MACRO_USE", MacroNameTok.getIdentifierInfo()->getName().str(), macroUsr, 
                 PUseLoc.getFilename(), PUseLoc.getLine(), PUseLoc.getColumn());
     }
