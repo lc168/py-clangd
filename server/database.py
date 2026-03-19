@@ -436,8 +436,8 @@ class Database:
             
             if process.returncode != 0:
                 # 打印出具体的错误原因，方便我们定位是少了头文件还是参数不对
-                logger.error(f"❌ C++ 核心解析失败 [{" ".join(cmd)}]\n{stderr_data}")
-                return "FAILED", stderr_data    
+                logger.error(f"❌ C++ 核心解析失败 [{cmd}]\n{stderr_data}")
+                return "FAILED", stderr_data
 
             for line in stdout_data.splitlines():
                 line = line.strip()

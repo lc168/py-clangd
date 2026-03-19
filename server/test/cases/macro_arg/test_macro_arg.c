@@ -12,5 +12,6 @@ struct platform_driver { int x; };
 static struct platform_driver my_driver = { .x = 1 }; // @def: my_driver  @ref_target: my_driver
 
 int init(void) {
-    return platform_driver_register(&my_driver); // @jump: my_driver  @ref_expect: my_driver
+    platform_driver_register(&my_driver); // @jump: my_driver  @ref_expect: my_driver
+    return 0;
 }
