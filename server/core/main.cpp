@@ -14,12 +14,11 @@ using namespace clang::tooling;
 
 // 统一 JSON 输出辅助函数
 void emitJson(const std::string &kind, const std::string &name, const std::string &usr, 
-              const std::string &type, const std::string &file, int line, int col) {
+              const std::string &file, int line, int col) {
     std::cout << "{"
               << "\"kind\":\"" << kind << "\", "
               << "\"name\":\"" << name << "\", "
               << "\"usr\":\"" << usr << "\", "
-              << "\"type\":\"" << type << "\", "
               << "\"file\":\"" << file << "\", "
               << "\"line\":" << line << ", \"col\":" << col
               << "}" << std::endl;
@@ -32,13 +31,15 @@ public:
     void MacroDefined(const Token &MacroNameTok, const MacroDirective *MD) override {
         if (SM.isInSystemHeader(MacroNameTok.getLocation())) return;
         PresumedLoc PLoc = SM.getPresumedLoc(MacroNameTok.getLocation());
-        emitJson("MACRO_DEF", MacroNameTok.getIdentifierInfo()->getName().str(), "", "", PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
+        std::string macroUsr = std::string("c:") + PLoc.getFilename() + "@" + MacroNameTok.getIdentifierInfo()->getName().str();
+        emitJson("MACRO_DEF", MacroNameTok.getIdentifierInfo()->getName().str(), macroUsr, PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
     }
     void MacroExpands(const Token &MacroNameTok, const MacroDefinition &MD, SourceRange Range, const MacroArgs *Args) override {
         SourceLocation Loc = SM.getSpellingLoc(Range.getBegin());
         if (SM.isInSystemHeader(Loc)) return;
         PresumedLoc PLoc = SM.getPresumedLoc(Loc);
-        emitJson("MACRO_USE", MacroNameTok.getIdentifierInfo()->getName().str(), "", "", PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
+        std::string macroUsr = std::string("c:") + PLoc.getFilename() + "@" + MacroNameTok.getIdentifierInfo()->getName().str();
+        emitJson("MACRO_USE", MacroNameTok.getIdentifierInfo()->getName().str(), macroUsr, PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
     }
 };
 
@@ -62,10 +63,8 @@ private:
         
         llvm::SmallString<128> USR;
         index::generateUSRForDecl(D, USR);
-        std::string Type = "None";
-        if (auto *VD = dyn_cast<ValueDecl>(D)) Type = VD->getType().getAsString();
         PresumedLoc PLoc = SM.getPresumedLoc(Loc);
-        emitJson(role + "_" + D->getDeclKindName(), D->getNameAsString(), USR.c_str(), Type, PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
+        emitJson(role + "_" + D->getDeclKindName(), D->getNameAsString(), USR.c_str(), PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
     }
 };
 

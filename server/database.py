@@ -78,14 +78,6 @@ class Database:
 
     @with_retry()
     def _setup(self):
-        # # 表 A：全局符号字典 (极致瘦身，只存 USR、名字、类型)
-        # self.cursor.execute('''
-        #     CREATE TABLE IF NOT EXISTS symbols (
-        #         usr TEXT PRIMARY KEY,
-        #         name TEXT,
-        #         kind TEXT
-        #     )''')
-        
         # 表 B：位置与引用关系 (使用 UNIQUE 防爆发)
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS symbols (
@@ -94,7 +86,7 @@ class Database:
                 s_col INTEGER,  -- 开始列
                 e_line INTEGER,  -- 结束行
                 e_col INTEGER,  -- 结束列
-                usr TEXT,  -- 如果是 inc，usr为头文件路径，如果是 def，usr为符号的USR
+                usr TEXT,  -- 如果role=inc，那么usr为头文件路径，如果role=def或者role=ref，usr为符号的USR
                 role TEXT,  -- 角色, 例如: "inc", "def", "ref"
                 name TEXT,  -- 符号或文件名字
                 kind TEXT,  -- 节点类型
@@ -106,7 +98,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS files (
                 file_path TEXT PRIMARY KEY,
                 mtime REAL,
-                status TEXT
+                compiler_args TEXT
             )''')
         
         # 表 D：源码与头文件的包含关系
@@ -373,11 +365,13 @@ class Database:
     # =========================================================================
 
     @staticmethod
-    def _clean_compiler_args(cmd_info):#mymark 这里参数需要裁剪一下
+    def clean_compiler_args(cmd_info):#mymark 这里参数需要裁剪一下
+        """清洗并组装传递给 libclang 的编译参数"""
+        #print("清洗并组装传递给 libclang 的编译参数:", cmd_info)
 
         directory = cmd_info.get('directory', '')
         file_rel = cmd_info.get('file', '')
-        source_file = os.path.realpath(os.path.join(directory, file_rel)) 
+        source_file = os.path.realpath(os.path.join(directory, file_rel))
 
         raw_args = cmd_info.get('arguments')
         if not raw_args:
@@ -388,50 +382,43 @@ class Database:
         """清洗并组装传递给 libclang 的编译参数"""
         compiler_args = []
         skip_next = False
-        source_basename = os.path.basename(source_file) if source_file else ""
+
+        # 这些前缀的参数在 LibTooling 中极易引起报错
+        forbidden_prefixes = (
+           'ssss', #测试参数
+           "sssss" #测试参数
+        )
+        
+        # 必须剔除的精确匹配参数 (会导致 -dependency-file 报错)
+        forbidden_exact = (
+           'ssss', #测试参数
+           "sssss" #测试参数
+        )
+
+        # 跳过当前和下一个参数
+        forbidden_skip_next = (
+            'sssssss', #测试参数
+        )
 
         for arg in raw_args[1:]:
             if skip_next:
                 skip_next = False
                 continue
-            if arg == '-o':
+            if arg in forbidden_skip_next:
                 skip_next = True
                 continue
-            if arg in ('-c', '-S'):#mymark 这里可能需要去掉
+            if arg in forbidden_exact or arg.startswith(forbidden_prefixes):
                 continue
-            if source_basename and os.path.basename(arg) == source_basename:
+            # 过滤掉源码文件路径本身（LibTooling 会在命令行第一项处理它）
+            if os.path.basename(arg) == os.path.basename(source_file):
                 continue
-            if arg in ('-fconserve-stack', '-fno-code-hoisting','-fno-var-tracking-assignments', '-fmerge-all-constants', '-fno-allow-store-data-races') \
-                or arg.startswith(('-mabi=', '-falign-kernels', '-mpreferred-stack-boundary=')):
-                continue
-            if arg in ('-MD', '-MMD', '-MP', '-MT') or arg.startswith(('-Wp,-MD', '-Wp,-MMD')):
-                continue
-            if arg == '-MF':
-                skip_next = True
-                continue
-            if arg.startswith('-Werror='):
-                continue
-            
             compiler_args.append(arg)
 
-        compiler_args.append('-fsyntax-only') #mymark 这里需要理解一下
-        compiler_args.append('-ferror-limit=0') #mymark 这里需要理解一下
-        compiler_args.extend([
-            '-Wno-error', '-Wno-strict-prototypes', '-Wno-implicit-int',
-            '-Wno-unknown-warning-option', '-Wno-unknown-attributes', '-Qunused-arguments'
-        ])
+        # mymark 先手动添加参数，以后优化
+        compiler_args.extend(['-isystem', '/home/lc/llvm23/lib/clang/23/include'])
+        # compiler_args.append('--target=aarch64-linux-gnu')
 
-        if directory:
-            compiler_args.extend(['-working-directory', directory])
-
-        compiler_path = raw_args[0] if raw_args else ''
-        if 'aarch64' in compiler_path or 'arm64' in compiler_path:
-            compiler_args.append('--target=aarch64-linux-gnu')
-        elif 'arm' in compiler_path:
-            compiler_args.append('--target=arm-linux-gnueabihf')
-
-        builtin_includes = '/home/lc/llvm23/lib/clang/23/include'  #mymark 这里需要规范一下，不能依赖固定的系统文件
-        compiler_args.extend(['-isystem', builtin_includes])  #mymark这里需要梳理一下是否会有冲突导致问题
+        #print("清洗并组装传递给 libclang 的编译参数:", compiler_args)
         return source_file, compiler_args
 
     # 需求2：调用 C++ 核心进行解析
@@ -445,7 +432,7 @@ class Database:
         # 构造命令: ./PyClangd-Core source.c -- args...
         cmd = [Database._core_bin_path, source_file, "--"] + compiler_args
         
-        # 动态编译版需要设置动态库搜索路径
+        # 动态编译版需要设置动态库搜索路径 #mymark 待修改
         env = os.environ.copy()
         env["LD_LIBRARY_PATH"] = "/home/lc/llvm23/lib:" + env.get("LD_LIBRARY_PATH", "")
 
@@ -459,7 +446,7 @@ class Database:
             
             if process.returncode != 0:
                 # 打印出具体的错误原因，方便我们定位是少了头文件还是参数不对
-                logger.error(f"❌ C++ 核心解析失败 [{os.path.basename(source_file)}]:\n{stderr_data}")
+                logger.error(f"❌ C++ 核心解析失败 [{" ".join(cmd)}]\n{stderr_data}")
                 return "FAILED", stderr_data    
 
             for line in stdout_data.splitlines():
@@ -480,15 +467,17 @@ class Database:
                     name = data.get("name", "")
                     s_line = data.get("line", 0)
                     s_col = data.get("col", 0)
+                    usr = data.get("usr", "")
                     
                     # 组合成存储格式
                     symbols_to_upsert.append((
                         f_path, s_line, s_col, s_line, s_col + len(name),
-                        data.get("usr", f"macro_{name}"), # 宏没有USR时用名字占位
+                        usr,
                         role, name, kind_raw
                     ))
                 except Exception as e:
-                    logger.warning(f"解析 JSON 行失败: {line}, error: {e}")
+                    logger.warning(f"解析 JSON 行失败: {line} \n error: {e}")
+                    
 
             process.wait()
             if process.returncode != 0:
@@ -505,7 +494,7 @@ class Database:
     def index_worker(cmd_info):
         """核心解析工人进程"""
         # 注意：这里需要确保 Database._core_bin_path 已在主进程设置
-        source_file, compiler_args = Database._clean_compiler_args(cmd_info)
+        source_file, compiler_args = Database.clean_compiler_args(cmd_info)
         mtime = os.path.getmtime(source_file)
         
         # 使用 C++ 核心进行解析
