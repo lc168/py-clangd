@@ -258,13 +258,11 @@ def main():
     args = parser.parse_args()
 
     if args.server:
-        ls.db = Database(args.directory, setup=False)
-        ls.db.load_commands_map()
+        ls.db = Database(args.directory, setup=True)
         logger.info(f"🌐 启动 PyClangd LSP Server (Workspace: {args.directory}) ...")
         ls.start_io()
     else:
         db = Database(args.directory, setup=True)
-        db.load_commands_map()
         db.run_index_mode(args.jobs)
 
 if __name__ == '__main__':

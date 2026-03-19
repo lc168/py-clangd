@@ -22,6 +22,8 @@ import shlex
 from cindex import Index, CursorKind
 import json
 import multiprocessing
+import threading
+import hashlib
 
 # 配置日志
 logging.basicConfig(
@@ -57,6 +59,8 @@ class Database:
     _core_bin_path = None
     _clang_include_path = None
     _clang_lib_path = None
+    commands_map = {}  #文件名 -> 编译命令
+    file_md5_map = {}  #文件名 -> md5 记录文件和md5的关系在编译之前，现在检查md5是否改变
 
     def __init__(self, workspace_dir = None, setup=False):
         # 如果传入了路径，就更新全局配置
@@ -81,6 +85,13 @@ class Database:
         # 3. 只有 setup 为 True 时才检查表结构
         if setup:
             self._setup()
+            self.load_commands_map()
+
+    def get_file_md5(self, file_path):
+        with open(file_path, "rb") as f:
+            # 直接使用 file_digest 自动处理分块逻辑
+            digest = hashlib.file_digest(f, "md5")
+        return digest.hexdigest()
 
     @with_retry()
     def _setup(self):
@@ -251,52 +262,26 @@ class Database:
         # 一种是自己分析依赖了那些头文件，
         # 另外一种是直接bear -- make 根据产生的新的compile_commands.json文件， 重新增量索引
         # py_clangd 增加 compile_commands.json文件 的参数
-        # 现在看移动目录执行编译命令是必须的，
-        logger.info(f"bug!开始编译更新: {file_path}")
-        
-        cmd_info = self.commands_map.get(file_path)
-        if not cmd_info:
-            logger.error(f"没有找到编译命令: {file_path}")
-            return
-        status, _ = self.index_worker((cmd_info, self.workspace_dir))
-        if status == "SUCCESS":
-            logger.info(f"✅ 更新成功: {os.path.basename(file_path)}")
-        else:
-            logger.info(f"❌ 更新失败: {os.path.basename(file_path)}")
-
-        return
-        """处理文件保存时的增量更新逻辑，返回需要重新索引的文件列表及其编译命令"""
-        dependent_sources = self.get_sources_including(file_path)
-        
-        cmd_info = self.commands_map.get(file_path)
-        files_to_index = []
-
-        if cmd_info:
-            files_to_index.append((file_path, cmd_info))
-        
-        for dep_src in dependent_sources:
-            if dep_src == file_path:
-                continue
-
-            dep_cmd = self.commands_map.get(dep_src)
-            if dep_cmd and not any(f[0] == dep_src for f in files_to_index):
-                files_to_index.append((dep_src, dep_cmd))
-        
-        if not files_to_index:
-            logger.warning(f"增量跳过: {file_path} 不在 compile_commands 中，且无关联源文件包含它")
+        # 现在看移动目录执行编译命令是必须的
+        # 检查文件md5是否改变
+        if self.file_md5_map.get(file_path) == self.get_file_md5(file_path):
+            logger.info(f"文件没有改变: {file_path}")
             return
 
-        logger.info(f"触发增量索引: {os.path.basename(file_path)}, 连带 {len(files_to_index)} 个依赖文件")
-
+        logger.info(f"开始编译更新: {file_path}")
         # 启动后台线程跑解析，坚决不阻塞 LSP 主线程的 UI 响应
         def reindex_task():
-            for src, cmd in files_to_index:
-                # logger.info(f"[开始解析] {src}")
-                status = self.index_worker((cmd, self.workspace_dir))
-                if status == "SUCCESS":
-                    logger.info(f"✅ 更新成功: {os.path.basename(src)}")
-                else:
-                    logger.info(f"❌ 更新失败: {os.path.basename(src)}")
+            cmd_info = self.commands_map.get(file_path)
+            if not cmd_info:
+                logger.error(f"没有找到编译命令: {file_path}")
+                return
+            status, source_file = self.index_worker(cmd_info)
+            if status == "SUCCESS":
+                logger.info(f"✅ 更新成功: {source_file}")
+                #保存，文件和 文件md5 的关系，用于后续判断文件是否改变
+                self.file_md5_map[source_file] = self.get_file_md5(source_file)
+            else:
+                logger.info(f"❌ 更新失败: {source_file}")
 
         reindex_task()
         #threading.Thread(target=reindex_task, daemon=True).start()
