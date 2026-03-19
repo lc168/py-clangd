@@ -98,7 +98,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS files (
                 file_path TEXT PRIMARY KEY,
                 mtime REAL,
-                compiler_args TEXT
+                status TEXT
             )''')
         
         # 表 D：源码与头文件的包含关系
@@ -415,7 +415,7 @@ class Database:
             compiler_args.append(arg)
 
         # mymark 先手动添加参数，以后优化
-        compiler_args.extend(['-isystem', '/home/lc/llvm23/lib/clang/23/include'])
+        compiler_args.extend(['-I', '/home/lc/llvm23/lib/clang/23/include'])
         # compiler_args.append('--target=aarch64-linux-gnu')
 
         #print("清洗并组装传递给 libclang 的编译参数:", compiler_args)
@@ -524,9 +524,24 @@ class Database:
         with open(cc_path, 'r', encoding='utf-8') as f:
             commands = json.load(f)
 
+        # 扫描整个commands 一旦发现文件重复，报错
+        # 重复文件标记数量
+        repeat_count = 0
+        file_set = set()
+        for cmd in commands:
+            file_rel = cmd.get('file', '')
+            abs_path = os.path.realpath(os.path.join(cmd.get('directory', ''), file_rel))
+            if abs_path in file_set:
+                logger.error(f"文件 {abs_path} 重复出现！！！")
+                repeat_count += 1
+            file_set.add(abs_path)
+
+        if repeat_count > 0:
+            logger.error(f"发现 {repeat_count} 个重复文件，请注意！！！")
+
         max_workers = 1 if jobs <= 0 else jobs
 
-        self.cursor.execute('SELECT file_path, mtime FROM files WHERE status = "completed"')
+        self.cursor.execute('SELECT file_path, mtime FROM files')
         indexed_files = {row[0]: row[1] for row in self.cursor.fetchall()}
 
         tasks = []
@@ -542,15 +557,14 @@ class Database:
             if not os.path.exists(abs_path):
                 logger.error(f"文件 {abs_path} 不存在")
                 continue
-                
+            
             mtime = os.path.getmtime(abs_path)
-            if abs_path in indexed_files and indexed_files[abs_path] >= mtime:
+            # 如果文件存在且mtime相同，说明文件没有被修改，跳过解析
+            if abs_path in indexed_files and indexed_files[abs_path] == mtime:
                 logger.info(f"文件 {abs_path} 已是最新状态，无需合并解析！")
                 continue
 
             tasks.append(cmd)
-            # 标记为 indexing 中状态
-            self.update_file_status(abs_path, mtime, 'indexing', commit=False)
 
         self.conn.commit()
 
