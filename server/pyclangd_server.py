@@ -137,7 +137,7 @@ def lsp_definition(server: PyClangdServer, params):
     try:
         results = server.db.lsp_definition_db(file_path, line_1, col_1)
         if results:
-            logger.info(f"   ↳ ✅ 查找成功: 找到 {len(results)} 个定义")
+            logger.info(f"   ↳ ✅ 查找成功: 找到 {len(results)} 个定义{results}")
             return [Location(
                 uri=f"file://{fp}",
                 range=Range(
@@ -173,7 +173,7 @@ def lsp_references(server: PyClangdServer, params):
     try:
         results = server.db.lsp_references_db(file_path, line_1, col_1)
         if results:
-            logger.info(f"   ↳ ✅ 引用查找成功: 找到 {len(results)} 处引用")
+            logger.info(f"   ↳ ✅ 引用查找成功: 找到 {len(results)} 处引用 {results}")
             return [Location(
                 uri=f"file://{fp}",
                 range=Range(

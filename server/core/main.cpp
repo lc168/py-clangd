@@ -29,6 +29,34 @@ class IndexerPPCallbacks : public PPCallbacks {
 public:
     explicit IndexerPPCallbacks(SourceManager &SM) : SM(SM) {}
 
+    // --- 新增：处理 #include 指令 ---
+    void InclusionDirective(SourceLocation HashLoc, const Token &IncludeTok,
+                          StringRef FileName, bool IsAngled,
+                          CharSourceRange FilenameRange, OptionalFileEntryRef File,
+                          StringRef SearchPath, StringRef RelativePath,
+                          const Module *SuggestedModule, bool ModuleImported,
+                          SrcMgr::CharacteristicKind FileType) override {
+        
+        // 1. 检查目标文件是否真的存在
+        if (!File) return;
+
+        // 2. 过滤掉系统头文件，保护数据库体积
+        if (SM.isInSystemHeader(HashLoc)) return;
+
+        // 3. 获取包含语句在主文件中的位置 (用于点击)
+        SourceLocation Loc = SM.getSpellingLoc(HashLoc);
+        PresumedLoc PLoc = SM.getPresumedLoc(Loc);
+        if (!PLoc.isValid()) return;
+
+        // 4. 获取被包含文件的真实绝对路径 (解决相对路径跳转失败)
+        std::string absIncludedPath = File->getName().str();
+
+        // 5. 发射 JSON
+        // kind 设为 "inc", role 设为 "inc", usr 存放目标文件的绝对路径
+        emitJson("inc", FileName.str(), absIncludedPath,
+                 PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
+    }
+
     // 1. 处理 #define
     void MacroDefined(const Token &MacroNameTok, const MacroDirective *MD) override {
         if (SM.isInSystemHeader(MacroNameTok.getLocation())) return;
@@ -121,11 +149,43 @@ public:
     }
 
 private:
-    void processSymbol(NamedDecl *D, const std::string &role, SourceLocation Loc) {
+    void processSymbol(NamedDecl *D, std::string role, SourceLocation Loc) {
         SourceManager &SM = Context.getSourceManager();
         Loc = SM.getSpellingLoc(Loc);
         if (SM.isInSystemHeader(Loc)) return;
     
+        // 在 processSymbol 内部：
+        bool isDef = false;
+        if (auto *FD = dyn_cast<FunctionDecl>(D)) {
+            isDef = FD->isThisDeclarationADefinition();
+        } else if (auto *VD = dyn_cast<VarDecl>(D)) {
+            isDef = VD->isThisDeclarationADefinition();
+        } else if (auto *TD = dyn_cast<TagDecl>(D)) {
+            isDef = TD->isThisDeclarationADefinition();
+        }
+
+        // --- 核心修复 A：区分 声明(DECL) 与 定义(DEF) ---
+        // 只有真正的函数体或变量初始化才标记为 DEF
+        if (role == "DEF" && !isDef) {
+            role = "REF"; 
+        }
+
+        // --- 核心修复 B：只索引主文件中的定义 (极其重要！) ---
+        // 如果你在解析 platform.c，那么只存 platform.c 里的符号定义。
+        // 这样可以彻底解决“一个定义在数据库里出现几百次”的问题。
+        if (role == "DEF" && !SM.isInMainFile(Loc)) return;
+
+        // --- 核心修复 C：强制转换为绝对路径 ---
+        FileID FID = SM.getFileID(Loc);
+        const FileEntry *FE = SM.getFileEntryForID(FID);
+        if (!FE) return;
+
+        // tryGetRealPathName 会尝试获取该文件在磁盘上的真实绝对路径
+        std::string absPath = FE->tryGetRealPathName().str();
+        if (absPath.empty()) {
+            absPath = SM.getFilename(Loc).str();
+        } // 兜底方案
+
         // --- 核心修复逻辑：穿透匿名成员 ---
         // 在内核中，dma_addr 经常是 IndirectFieldDecl
         if (auto *IFD = dyn_cast<IndirectFieldDecl>(D)) {
