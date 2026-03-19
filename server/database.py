@@ -58,14 +58,14 @@ class Database:
     _clang_include_path = None
     _clang_lib_path = None
 
-    def __init__(self, workspace_dir = None):
+    def __init__(self, workspace_dir = None, setup=False):
         # 如果传入了路径，就更新全局配置
         if workspace_dir:
             Database._workspace_dir = os.path.abspath(workspace_dir)
             # 自动推导核心二进制路径
             script_dir = os.path.dirname(os.path.abspath(__file__))
             Database._core_bin_path = os.path.join(script_dir, "core/build/PyClangd-Core")
-            Database._clang_include_path = os.path.join(script_dir, "clang_include/")
+            Database._clang_include_path = os.path.join(script_dir, "clang_include/include")
             Database._clang_lib_path = os.path.join(script_dir, "clang_libs/")
 
         if not Database._workspace_dir:
@@ -78,7 +78,9 @@ class Database:
         self.cursor = self.conn.cursor()
         self.conn.execute('PRAGMA journal_mode=WAL;')
         self.conn.execute('PRAGMA synchronous=NORMAL;')
-        self._setup()
+        # 3. 只有 setup 为 True 时才检查表结构
+        if setup:
+            self._setup()
 
     @with_retry()
     def _setup(self):
@@ -599,27 +601,3 @@ class Database:
     def close(self):
         self.conn.close()
 
-    
-
-# if __name__ == '__main__':
-#     # 删除 pyclangd_index.db
-#     import os
-#     file = "test_kernel_def.c"
-#     workspace_dir = "/home/lc/py-clangd/server/test/cases/kernel/"
-#     db_path = workspace_dir+"pyclangd_index.db"
-#     if os.path.exists(db_path):
-#         os.remove(db_path)
-#     db = Database(workspace_dir)
-
-#     cmd_info = {
-#         "directory": workspace_dir,  # 编译执行的工作目录
-#         "file": file,    # 源文件的相对路径或绝对路径
-        
-#         # 编译器及编译参数（注意一定要有 -I 指定头文件搜索路径，否则 clang 解析会报错）
-#         "arguments": [
-#             "clang",
-#             "-E",           # 告诉 clang 按照 C 语言解析 (-xc++ 就是 C++)
-#         ]
-#     }
-#     logger.info(f"开始索引: {cmd_info}")
-#     db.index_worker((cmd_info, ""))
