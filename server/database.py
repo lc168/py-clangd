@@ -4,11 +4,12 @@
 # mytodo 3. 增加对c++分析的支持
 # mytodo 4. 增加对函数调用关系的绘制
 # mytodo 5. 增加对结构体变量的绘制
-# mytodo 6. 修改index_worker(args) 和后面的参数清洗
-# mytodo 7. lsp_did_save_db改成单文件更新
+# mytodo 6. 修改index_worker(args) 和后面的参数清洗(ok)
+# mytodo 7. lsp_did_save_db改成单文件更新(ok)
 # mytodo 8. 继续梳理代码逻辑，考虑还有那些功能？？为什么宏函数好像还是漏掉了？
 # mytodo 9, 引用读，写，执行？定义？分析？
 # mytodo 10, 增加libclang的so库准备发布代码
+# mytodo 11, 解决幽灵符号的问题
 
 import sqlite3
 import os
@@ -115,7 +116,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS files (
                 file_path TEXT PRIMARY KEY,
                 mtime REAL,
-                status TEXT
+                md5 TEXT
             )''')
         
         # 表 D：源码与头文件的包含关系
@@ -123,7 +124,6 @@ class Database:
             CREATE TABLE IF NOT EXISTS includes (
                 source_file TEXT,
                 included_file TEXT,
-                exact_path TEXT,
                 UNIQUE(source_file, included_file)
             )''')
         
@@ -171,17 +171,27 @@ class Database:
         self.conn.commit()
 
     @with_retry()
-    def save_parse_result(self, file_path, mtime, symbols):
-        """【性能核心】：单次事务完成状态更新、清理与写入"""
-        # 1. 更新状态与清理
-        self.cursor.execute('INSERT OR REPLACE INTO files VALUES (?, ?, ?)', (file_path, mtime, 'completed'))
-        #删除掉file_path对应的所有记录
-        self.cursor.execute('DELETE FROM symbols WHERE file_path = ?', (file_path,))
+    def save_parse_result(self, source_file, source_md5, symbols, includes):
+        # 1. 保存主文件 MD5
+        mtime = os.path.getmtime(source_file)
+        self.cursor.execute('INSERT OR REPLACE INTO files (file_path, md5, mtime) VALUES (?, ?, ?)', 
+                            (source_file, source_md5, mtime))
+        
+        # 2. 刷新依赖并顺手算头文件的 MD5
+        self.cursor.execute('DELETE FROM includes WHERE source_file = ?', (source_file,))
+        if includes:
+            self.cursor.executemany('INSERT OR IGNORE INTO includes (source_file, included_file) VALUES (?, ?)', includes)
+            for _, included_file in includes:
+                if os.path.exists(included_file):
+                    inc_md5 = self.get_file_md5(included_file)
+                    self.cursor.execute('INSERT OR REPLACE INTO files (file_path, md5) VALUES (?, ?)', 
+                                        (included_file, inc_md5))
 
-        # 2. 写入数据
+        # 3. 清除主文件旧符号，插入新符号
+        self.cursor.execute('DELETE FROM symbols WHERE file_path = ?', (source_file,))
         if symbols:
             self.cursor.executemany('INSERT OR IGNORE INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', symbols)
-        # 3. 落盘
+
         self.conn.commit()
 
     # --- LSP 查询接口 (全部升级为单表查询) ---
@@ -422,6 +432,7 @@ class Database:
         env["LD_LIBRARY_PATH"] = Database._clang_lib_path + ":" + env.get("LD_LIBRARY_PATH", "")
 
         symbols_to_upsert = []
+        includes_to_upsert = []
         try:
             # 执行并获取输出
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
@@ -439,26 +450,24 @@ class Database:
                 
                 try:
                     data = json.loads(line)
-                    # 将 C++ JSON 映射回 Python 数据库元组
-                    # C++ 输出包含: kind, name, usr, line, col, file(可选)
                     kind_raw = data.get("kind", "")
-                    # 简单拆分角色(DEF/REF)和类型
-                    if "DEF" in kind_raw:
-                        role = "def" # 变量定义
-                    else:
-                        role = "ref" # 变量引用
-
-                    if "MACRO_USE" in kind_raw:
-                        role = "ref" # 宏展开
-                    if "MACRO_DEF" in kind_raw:
-                        role = "def" # 宏定义
                     
-                    # 统一文件路径
+                    if kind_raw == "inc":
+                        role = "inc"
+                    elif "DEF" in kind_raw or "MACRO_DEF" in kind_raw:
+                        role = "def" 
+                    else:
+                        role = "ref"
+                    
                     f_path = data.get("file", source_file)
                     name = data.get("name", "")
                     s_line = data.get("line", 0)
                     s_col = data.get("col", 0)
                     usr = data.get("usr", "")
+
+                    # 收集依赖：源文件包含的头文件
+                    if role == "inc" and f_path and usr:
+                        includes_to_upsert.append((f_path, usr))
                     
                     # 组合成存储格式
                     symbols_to_upsert.append((
@@ -468,35 +477,35 @@ class Database:
                     ))
                 except Exception as e:
                     logger.warning(f"解析 JSON 行失败: {line} \n error: {e}")
-                    
 
             process.wait()
             if process.returncode != 0:
                 logger.error(f"PyClangd-Core 返回异常状态码: {process.returncode}")
-                return "FAILED", []
+                return "FAILED", [], []
 
-            return "SUCCESS", symbols_to_upsert
+            return "SUCCESS", symbols_to_upsert, includes_to_upsert
 
         except Exception as e:
             logger.exception(f"执行 PyClangd-Core 崩溃: {e}")
-            return "FAILED", []
+            return "FAILED", [], []
 
     @staticmethod
     def index_worker(cmd_info):
         """核心解析工人进程"""
         # 注意：这里需要确保 Database._core_bin_path 已在主进程设置
         source_file, compiler_args = Database.clean_compiler_args(cmd_info)
-        mtime = os.path.getmtime(source_file)
-        
         # 使用 C++ 核心进行解析
-        status, symbols = Database.index_parse_cpp(source_file, compiler_args)
+        # 接收三个返回值
+        status, symbols, includes = Database.index_parse_cpp(source_file, compiler_args)
 
         if status == "FAILED":
             return "FAILED", source_file
         else:
             # 需求1：使用无参初始化（前提是主进程已初始化过）
-            db = Database() 
-            db.save_parse_result(source_file, mtime, symbols)
+            db = Database()
+            source_md5 = db.get_file_md5(source_file)
+            # 传入 md5 和 includes
+            db.save_parse_result(source_file, source_md5, symbols, includes)
             db.close()
             return "SUCCESS", source_file
 

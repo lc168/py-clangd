@@ -12,6 +12,50 @@
 using namespace clang;
 using namespace clang::tooling;
 
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+
+// --- 1. 辅助函数：获取规范化绝对路径 (带 Size-1 缓存) ---
+std::string getAbsPath(SourceManager &SM, SourceLocation Loc) {
+    static thread_local std::string lastRawPath = "";
+    static thread_local std::string lastRealPath = "";
+
+    FileID FID = SM.getFileID(Loc);
+    auto FE = SM.getFileEntryRefForID(FID);
+    if (!FE) return "";
+
+    std::string currentPath = FE->getName().str();
+
+    // --- 新增：放行 Clang 的内部虚拟文件 ---
+    // 这些文件不需要（也无法）去硬盘上找绝对路径，直接原样返回即可
+    if (currentPath == "<built-in>" || currentPath == "<command line>" || currentPath == "<scratch space>") {
+        return currentPath;
+    }
+
+    // 1. 命中缓存，直接返回
+    if (currentPath == lastRawPath) {
+        return lastRealPath;
+    }
+
+    // 2. 未命中缓存，请求操作系统进行规范化
+    llvm::SmallString<256> realPath;
+    if (!llvm::sys::fs::real_path(currentPath, realPath)) {
+        // 更新缓存
+        lastRawPath = currentPath;
+        lastRealPath = realPath.str().str();
+        return lastRealPath;
+    } else {
+        // 3. 真正遇到了异常情况（如文件权限被拒、文件刚被删除等）
+        // 遵循你的思路：Fail-Fast 坚决报错，拒绝返回脏路径
+        std::cerr << "[Warning] Could not resolve real path for disk file: " << currentPath << std::endl;
+        
+        // 更新缓存为空，防止下次同样的错误文件反复触发系统调用和打印
+        lastRawPath = currentPath;
+        lastRealPath = ""; 
+        return "";
+    }
+}
+
 // 统一 JSON 输出辅助函数
 void emitJson(const std::string &kind, const std::string &name, const std::string &usr, 
               const std::string &file, int line, int col) {
@@ -40,21 +84,34 @@ public:
         // 1. 检查目标文件是否真的存在
         if (!File) return;
 
-        // 2. 过滤掉系统头文件，保护数据库体积
+        //2. 过滤掉系统头文件，保护数据库体积
         if (SM.isInSystemHeader(HashLoc)) return;
 
-        // 3. 获取包含语句在主文件中的位置 (用于点击)
-        SourceLocation Loc = SM.getSpellingLoc(HashLoc);
-        PresumedLoc PLoc = SM.getPresumedLoc(Loc);
-        if (!PLoc.isValid()) return;
+        // 1. 核心修复：获取文件名在源码中的起始位置 (FilenameRange.getBegin())
+        // 而不是使用 HashLoc (#号的位置)
+        SourceLocation FileStartLoc = SM.getSpellingLoc(FilenameRange.getBegin());
+        PresumedLoc PLoc = SM.getPresumedLoc(FileStartLoc);
+        if (!PLoc.isValid())
+            return;
 
-        // 4. 获取被包含文件的真实绝对路径 (解决相对路径跳转失败)
-        std::string absIncludedPath = File->getName().str();
+        // 2. 获取主文件的绝对路径 (调用上面的工具函数)
+        std::string mainFileAbs = getAbsPath(SM, FileStartLoc);
 
-        // 5. 发射 JSON
-        // kind 设为 "inc", role 设为 "inc", usr 存放目标文件的绝对路径
-        emitJson("inc", FileName.str(), absIncludedPath,
-                 PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
+        // 3. 获取目标头文件的绝对路径 (存入 usr 字段供跳转使用)
+        std::string targetAbs = File->getName().str();
+        if (llvm::sys::path::is_relative(targetAbs)) {
+            llvm::SmallString<256> tmp(targetAbs);
+            SM.getFileManager().makeAbsolutePath(tmp);
+            targetAbs = tmp.str().str();
+        }
+
+        // 4. 发射 JSON
+        // name: "linux/platform_device.h"
+        // usr: "/home/lc/kernel/include/linux/platform_device.h"
+        // file: "/home/lc/kernel/drivers/base/platform.c"
+        // line/col: 定位到文件名的起始点
+        emitJson("inc", FileName.str(), targetAbs, mainFileAbs, 
+                 PLoc.getLine(), PLoc.getColumn());
     }
 
     // 1. 处理 #define
@@ -62,8 +119,11 @@ public:
         if (SM.isInSystemHeader(MacroNameTok.getLocation())) return;
         PresumedLoc PLoc = SM.getPresumedLoc(MacroNameTok.getLocation());
         if (!PLoc.isValid()) return;
-        std::string macroUsr = std::string("c:") + PLoc.getFilename() + "@" + MacroNameTok.getIdentifierInfo()->getName().str();
-        emitJson("MACRO_DEF", MacroNameTok.getIdentifierInfo()->getName().str(), macroUsr, PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
+
+        // ✅ 获取真正的绝对路径
+        std::string absPath = getAbsPath(SM, MacroNameTok.getLocation());
+        std::string macroUsr = std::string("c:") + absPath + "@" + MacroNameTok.getIdentifierInfo()->getName().str();
+        emitJson("MACRO_DEF", MacroNameTok.getIdentifierInfo()->getName().str(), macroUsr, absPath, PLoc.getLine(), PLoc.getColumn());
     }
 
     // 2. 处理普通的宏展开
@@ -94,18 +154,25 @@ private:
         PresumedLoc PUseLoc = SM.getPresumedLoc(UseLoc);
         if (!PUseLoc.isValid()) return;
 
+        // ✅ 1. 获取宏【调用处】的真正绝对路径
+        std::string absUsePath = getAbsPath(SM, UseLoc);
+
         std::string defFile = "<builtin>";
         if (const MacroInfo *MI = MD.getMacroInfo()) {
             SourceLocation DefLoc = MI->getDefinitionLoc();
             if (DefLoc.isValid() && !SM.isWrittenInBuiltinFile(DefLoc) && !SM.isWrittenInCommandLineFile(DefLoc)) {
-                PresumedLoc PDefLoc = SM.getPresumedLoc(DefLoc);
-                if (PDefLoc.isValid()) defFile = PDefLoc.getFilename();
+                // ✅ 2. 获取宏【定义处】的真正绝对路径 (关键修复：确保 USR 一致)
+                // 之前这里用的是 PDefLoc.getFilename()，可能会导致 USR 里混入相对路径
+                defFile = getAbsPath(SM, DefLoc); 
             }
         }
 
+        // 组装 USR
         std::string macroUsr = std::string("c:") + defFile + "@" + MacroNameTok.getIdentifierInfo()->getName().str();
+        
+        // 发射 JSON，使用 absUsePath 替代原先的 PUseLoc.getFilename()
         emitJson("MACRO_USE", MacroNameTok.getIdentifierInfo()->getName().str(), macroUsr, 
-                PUseLoc.getFilename(), PUseLoc.getLine(), PUseLoc.getColumn());
+                absUsePath, PUseLoc.getLine(), PUseLoc.getColumn());
     }
 };
 
@@ -162,6 +229,13 @@ private:
             isDef = VD->isThisDeclarationADefinition();
         } else if (auto *TD = dyn_cast<TagDecl>(D)) {
             isDef = TD->isThisDeclarationADefinition();
+        } else if (isa<FieldDecl>(D) || isa<EnumConstantDecl>(D) || isa<TypedefNameDecl>(D)) {
+            // --- 核心修复：补全必定是定义的节点类型 ---
+            // 1. FieldDecl: 结构体/联合体成员
+            // 2. EnumConstantDecl: 枚举里的具体取值
+            // 3. TypedefNameDecl: typedef 类型别名
+            // 这些东西在代码里只要写出来，它本身就是定义，不存在“先声明后定义”的说法
+            isDef = true;
         }
 
         // --- 核心修复 A：区分 声明(DECL) 与 定义(DEF) ---
@@ -173,7 +247,7 @@ private:
         // --- 核心修复 B：只索引主文件中的定义 (极其重要！) ---
         // 如果你在解析 platform.c，那么只存 platform.c 里的符号定义。
         // 这样可以彻底解决“一个定义在数据库里出现几百次”的问题。
-        if (role == "DEF" && !SM.isInMainFile(Loc)) return;
+        //if (role == "DEF" && !SM.isInMainFile(Loc)) return;
 
         // --- 核心修复 C：强制转换为绝对路径 ---
         FileID FID = SM.getFileID(Loc);
@@ -198,7 +272,7 @@ private:
         llvm::SmallString<128> USR;
         index::generateUSRForDecl(D, USR);
         PresumedLoc PLoc = SM.getPresumedLoc(Loc);
-        emitJson(role + "_" + D->getDeclKindName(), D->getNameAsString(), USR.c_str(), PLoc.getFilename(), PLoc.getLine(), PLoc.getColumn());
+        emitJson(role + "_" + D->getDeclKindName(), D->getNameAsString(), USR.c_str(), absPath, PLoc.getLine(), PLoc.getColumn());
     }
 };
 
