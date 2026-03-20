@@ -212,8 +212,45 @@ public:
         else if (auto TTL = TL.getAs<TagTypeLoc>()) {
             processSymbol(TTL.getDecl(), "REF", TTL.getNameLoc());
         }
+        // --- 新增：C++ 模板特化类型 (如 std::vector<int>) ---
+        else if (auto TSTL = TL.getAs<TemplateSpecializationTypeLoc>()) {
+            TemplateDecl *TD = TSTL.getTypePtr()->getTemplateName().getAsTemplateDecl();
+            if (TD) processSymbol(TD, "REF", TSTL.getTemplateNameLoc());
+        }
+        // --- 新增：处理通过 using 引入的类型别名 ---
+        else if (auto ITL = TL.getAs<InjectedClassNameTypeLoc>()) {
+            processSymbol(ITL.getDecl(), "REF", ITL.getNameLoc());
+        }
         return true;
     }
+
+    // 拦截 C++ 构造函数调用 (比如 MyClass obj; 或者 new MyClass())
+    bool VisitCXXConstructExpr(CXXConstructExpr *E) {
+        if (CXXConstructorDecl *CD = E->getConstructor()) {
+            processSymbol(CD, "REF", E->getLocation());
+        }
+        return true;
+    }
+
+    // 拦截 delete 操作符，指向析构函数
+    bool VisitCXXDeleteExpr(CXXDeleteExpr *E) {
+        if (CXXRecordDecl *RD = E->getDestroyedType()->getAsCXXRecordDecl()) {
+            if (CXXDestructorDecl *DD = RD->getDestructor()) {
+                processSymbol(DD, "REF", E->getBeginLoc());
+            }
+        }
+        return true;
+    }
+
+    // 拦截重载运算符 (如 a + b, obj->foo)
+    bool VisitCXXOperatorCallExpr(CXXOperatorCallExpr *E) {
+        if (FunctionDecl *FD = E->getDirectCallee()) {
+            processSymbol(FD, "REF", E->getOperatorLoc());
+        }
+        return true;
+    }
+
+
 
 private:
     void processSymbol(NamedDecl *D, std::string role, SourceLocation Loc) {
@@ -237,6 +274,12 @@ private:
         } else if (auto *TD = dyn_cast<TagDecl>(D)) {
             isDef = TD->isThisDeclarationADefinition();
         }
+        // 👇 --- 新增：C++ 模板的前向声明检查 ---
+        else if (auto *CTD = dyn_cast<ClassTemplateDecl>(D)) {
+            isDef = CTD->isThisDeclarationADefinition();
+        } else if (auto *FTD = dyn_cast<FunctionTemplateDecl>(D)) {
+            isDef = FTD->isThisDeclarationADefinition();
+        }
         // 其他任何奇奇怪怪的 Decl 走到这里，都会保持 isDef = true，再也不会被误伤成 REF 了！
 
         // --- 区分 声明(DECL) 与 定义(DEF) ---
@@ -244,21 +287,9 @@ private:
             role = "REF"; 
         }
 
-        // --- 核心修复 B：只索引主文件中的定义 (极其重要！) ---
-        // 如果你在解析 platform.c，那么只存 platform.c 里的符号定义。
-        // 这样可以彻底解决“一个定义在数据库里出现几百次”的问题。
-        //if (role == "DEF" && !SM.isInMainFile(Loc)) return;
-
-        // --- 核心修复 C：强制转换为绝对路径 ---
-        FileID FID = SM.getFileID(Loc);
-        const FileEntry *FE = SM.getFileEntryForID(FID);
-        if (!FE) return;
-
-        // tryGetRealPathName 会尝试获取该文件在磁盘上的真实绝对路径
-        std::string absPath = FE->tryGetRealPathName().str();
-        if (absPath.empty()) {
-            absPath = SM.getFilename(Loc).str();
-        } // 兜底方案
+        // --- 核心修复 C：强制转换为绝对路径 (使用极速缓存版) ---
+        std::string absPath = getAbsPath(SM, Loc);
+        if (absPath.empty()) return; // 如果路径非法(比如系统报错)，直接丢弃这个符号
 
         // --- 核心修复逻辑：穿透匿名成员 ---
         // 在内核中，dma_addr 经常是 IndirectFieldDecl
