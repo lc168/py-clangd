@@ -221,25 +221,25 @@ private:
         Loc = SM.getSpellingLoc(Loc);
         if (SM.isInSystemHeader(Loc)) return;
     
-        // 在 processSymbol 内部：
-        bool isDef = false;
+        // --- 极其优雅的终极防御写法 ---
+        // 默认认为是定义 (因为在 C/C++ 中，绝大多数实体如 Field, Typedef, EnumConstant 都是一经声明即定义)
+        // 在 C/C++ 的语言特性中，只有函数 (Function)、变量 (Var) 和聚合类型 (Tag: struct/union/enum/class) 
+        // 这三样东西拥有“前向声明（先声明后定义）”的特权。
+        // 除了这三位老大哥，其他的所有具名节点（成员变量、枚举值、typedef、模板参数等），只要在代码里写出来了，它必定就是定义！
+        bool isDef = true;
+
+        // 只有 Function, Var, Tag (struct/union/enum) 这三种节点拥有“前向声明”的概念。
+        // 对于这三种节点，我们必须向 Clang 严查它们到底有没有实体。
         if (auto *FD = dyn_cast<FunctionDecl>(D)) {
             isDef = FD->isThisDeclarationADefinition();
         } else if (auto *VD = dyn_cast<VarDecl>(D)) {
             isDef = VD->isThisDeclarationADefinition();
         } else if (auto *TD = dyn_cast<TagDecl>(D)) {
             isDef = TD->isThisDeclarationADefinition();
-        } else if (isa<FieldDecl>(D) || isa<EnumConstantDecl>(D) || isa<TypedefNameDecl>(D)) {
-            // --- 核心修复：补全必定是定义的节点类型 ---
-            // 1. FieldDecl: 结构体/联合体成员
-            // 2. EnumConstantDecl: 枚举里的具体取值
-            // 3. TypedefNameDecl: typedef 类型别名
-            // 这些东西在代码里只要写出来，它本身就是定义，不存在“先声明后定义”的说法
-            isDef = true;
         }
+        // 其他任何奇奇怪怪的 Decl 走到这里，都会保持 isDef = true，再也不会被误伤成 REF 了！
 
-        // --- 核心修复 A：区分 声明(DECL) 与 定义(DEF) ---
-        // 只有真正的函数体或变量初始化才标记为 DEF
+        // --- 区分 声明(DECL) 与 定义(DEF) ---
         if (role == "DEF" && !isDef) {
             role = "REF"; 
         }
