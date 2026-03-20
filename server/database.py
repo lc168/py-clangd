@@ -218,19 +218,27 @@ class Database:
         ''', (f"%{query}%",))
         return self.cursor.fetchall()
 
+    def show_res(self, res):
+        for index, r in enumerate(res, start=1):
+            logger.info(f"✅ {index:>8}:{r[0]}:{r[1]}:{r[2]}:{r[3]}:{r[4]}")
+
     def lsp_definition_db(self, file_path, line, col):
         # 获取定义
         """查定义核心逻辑：优先头文件跳转，后查 USR 跳跃（适配 Symbols 单表融合版架构）"""
+        logger.info(f"👉 发起跳转: {file_path}:{line}:{col}")
         self.cursor.execute('''
             SELECT role, usr FROM symbols
             WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
             ''', (file_path, line, col, col))
+
         res = self.cursor.fetchone()
-        logger.info(f"find usr: {res}")
+        logger.info(f"查询usr结果: {res}")
+
         if not res:
-            logger.info(f"没有找到:{file_path}:{line}:{col}的usr")
+            logger.info(f"❌查找usr失败")
             return []
         role, target_str = res
+
         if role == 'inc':
             logger.info(f"找到头文件: {target_str}")
             # 头文件路径直接就存在了 target_str 中
@@ -243,7 +251,12 @@ class Database:
                 WHERE usr = ? AND role = 'def'
             ''', (target_str,))
             res = self.cursor.fetchall()
-            logger.info(f"find def: {res}")
+            if res:
+                logger.info(f"✅ 查找定义结果: 找到 {len(res)} 个定义")
+                self.show_res(res)
+            else:
+                logger.info(f"❌ 查找定义失败: 坐标未命或未找到定义")
+
             return res
 
         return []
@@ -251,10 +264,17 @@ class Database:
     def lsp_references_db(self, file_path, line, col):
         # mymark 获取变量引用
         """查引用核心逻辑"""
+        logger.info(f"👉 查找引用: {file_path}:{line}:{col}")
         usr = self.get_usr_at_location(file_path, line, col)
         if usr:
-            logger.info(f"找到{usr}")
-            return self.get_references_by_usr(usr)
+            logger.info(f"找到引用usr={usr}")
+            res = self.get_references_by_usr(usr)
+            if res:
+                logger.info(f"✅ 查找引用结果: 找到 {len(res)} 个定义")
+                self.show_res(res)
+            else:
+                logger.info(f"❌ 查找引用失败: 坐标未命或未找到定义")
+            return res
         else:
             logger.info(f"没有找到:{file_path}:{line}:{col}的usr")
         return []

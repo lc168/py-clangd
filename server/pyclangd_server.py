@@ -129,15 +129,12 @@ def lsp_definition(server: PyClangdServer, params):
     # 转换为 Clang/DB 使用的 1-indexed
     line_1 = line_0 + 1
     col_1 = col_0 + 1
-    
-    logger.info(f"👉 发起跳转: {file_path}:{line_1}:{col_1}")
-    
+
     if not server.db:
         return None
     try:
         results = server.db.lsp_definition_db(file_path, line_1, col_1)
         if results:
-            logger.info(f"   ↳ ✅ 查找成功: 找到 {len(results)} 个定义{results}")
             return [Location(
                 uri=f"file://{fp}",
                 range=Range(
@@ -161,19 +158,15 @@ def lsp_references(server: PyClangdServer, params):
     file_path = os.path.normpath(uri.replace("file://", ""))
     line_0 = params.position.line
     col_0 = params.position.character
-    
+
     line_1 = line_0 + 1
     col_1 = col_0 + 1
     
-    logger.info(f"👉 查找引用: {file_path} 行{line_1} 列{col_1}")
-    
     if not server.db:
         return []
-        
     try:
         results = server.db.lsp_references_db(file_path, line_1, col_1)
         if results:
-            logger.info(f"   ↳ ✅ 引用查找成功: 找到 {len(results)} 处引用 {results}")
             return [Location(
                 uri=f"file://{fp}",
                 range=Range(
@@ -181,8 +174,6 @@ def lsp_references(server: PyClangdServer, params):
                     end=Position(line=el-1, character=ec-1)
                 )
             ) for fp, sl, sc, el, ec in results]
-                
-        logger.info("   ↳ ❌ 查找引用失败: 未找到任何引用")
         # 返回空列表而不是 None 是查找引用的标准行为
         return []
 
