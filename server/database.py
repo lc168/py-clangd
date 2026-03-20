@@ -240,7 +240,7 @@ class Database:
         role, target_str = res
 
         if role == 'inc':
-            logger.info(f"找到头文件: {target_str}")
+            logger.info(f"✅ 找到头文件: {target_str}")
             # 头文件路径直接就存在了 target_str 中
             return [(target_str, 1, 1, 1, 1)]
         elif role in ('ref', 'def'):
