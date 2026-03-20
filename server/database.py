@@ -280,32 +280,45 @@ class Database:
         return []
 
     def lsp_did_save_db(self, file_path):
-        #mymark  lsp_did_save_db这里消耗的时间实在太久了，只能暂时跳过，需要好好想想办法，如果想彻底解决，
-        # 也许真的需要深度分析编译文件的依赖关系,那么真的有点复杂了，建议改成主动增量索引
-        # 主动增量索引也有两种方式，
-        # 一种是自己分析依赖了那些头文件，
-        # 另外一种是直接bear -- make 根据产生的新的compile_commands.json文件， 重新增量索引
-        # py_clangd 增加 compile_commands.json文件 的参数
-        # 现在看移动目录执行编译命令是必须的
-        # 检查文件md5是否改变
-        if self.file_md5_map.get(file_path) == self.get_file_md5(file_path):
-            logger.info(f"文件没有改变: {file_path}")
+        # 计算文件md5值
+        current_md5 = self.get_file_md5(file_path)
+        self.cursor.execute('SELECT md5 FROM files WHERE file_path = ?', (file_path,))
+        res = self.cursor.fetchone()
+        
+        if res and res[0] == current_md5:
+            logger.info(f"主文件未变，跳过: {file_path}")
             return
 
-        logger.info(f"开始编译更新: {file_path}")
-        # 启动后台线程跑解析，坚决不阻塞 LSP 主线程的 UI 响应
+        logger.info(f"开始增量分析并更新: {file_path}")
+
+        # 查出依赖库，检查变脏的头文件
+        self.cursor.execute('SELECT included_file FROM includes WHERE source_file = ?', (file_path,))
+        dependencies = [row[0] for row in self.cursor.fetchall()]
+
+        dirty_headers = []
+        for inc_file in dependencies:
+            if not os.path.exists(inc_file): continue
+            
+            inc_current_md5 = self.get_file_md5(inc_file)
+            self.cursor.execute('SELECT md5 FROM files WHERE file_path = ?', (inc_file,))
+            inc_old_md5_res = self.cursor.fetchone()
+            
+            # 如果变脏了，立刻清理它曾经产生的所有符号！
+            if not inc_old_md5_res or inc_old_md5_res[0] != inc_current_md5:
+                dirty_headers.append(inc_file)
+                self.cursor.execute('DELETE FROM symbols WHERE file_path = ?', (inc_file,))
+        
+        self.conn.commit()
+        
+        if dirty_headers:
+            logger.info(f"检测到 {len(dirty_headers)} 个头文件发生变化，已清理旧幽灵符号。")
+
         def reindex_task():
             cmd_info = self.commands_map.get(file_path)
-            if not cmd_info:
-                logger.error(f"没有找到编译命令: {file_path}")
-                return
+            if not cmd_info: return
             status, source_file = self.index_worker(cmd_info)
             if status == "SUCCESS":
                 logger.info(f"✅ 更新成功: {source_file}")
-                #保存，文件和 文件md5 的关系，用于后续判断文件是否改变
-                self.file_md5_map[source_file] = self.get_file_md5(source_file)
-            else:
-                logger.info(f"❌ 更新失败: {source_file}")
 
         reindex_task()
         #threading.Thread(target=reindex_task, daemon=True).start()
