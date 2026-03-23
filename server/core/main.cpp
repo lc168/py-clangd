@@ -8,12 +8,14 @@
 #include "clang/Index/USRGeneration.h"
 #include "llvm/ADT/SmallString.h"
 #include <iostream>
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 
 using namespace clang;
 using namespace clang::tooling;
 
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/Path.h"
+// 提前声明命令行类别
+static llvm::cl::OptionCategory MyToolCategory("PyClangd-Core Options");
 
 // --- 1. 辅助函数：获取规范化绝对路径 (带 Size-1 缓存) ---
 std::string getAbsPath(SourceManager &SM, SourceLocation Loc) {
@@ -197,6 +199,44 @@ public:
         return true;
     }
 
+    // 拦截 offsetof(type, member) 中的成员引用
+    // #define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
+    bool VisitOffsetOfExpr(OffsetOfExpr *E) {
+        // offsetof 可以连续取成员，比如 offsetof(struct A, b.c.d)
+        for (unsigned I = 0, N = E->getNumComponents(); I < N; ++I) {
+            OffsetOfNode Node = E->getComponent(I);
+            if (Node.getKind() == OffsetOfNode::Field) {
+                if (FieldDecl *FD = Node.getField()) {
+                    // 🌟 修复：在现代 Clang (LLVM 23) 中，位置信息存储在 Node 本身上
+                    SourceLocation Loc = Node.getBeginLoc();
+                    
+                    // (备用方案：如果你的特定版本连 getBeginLoc 都没有，
+                    // 可以安全地使用 E->getExprLoc() 替代，它会定位到 offsetof 宏的开头)
+                    
+                    processSymbol(FD, "REF", Loc);
+                }
+            }
+        }
+        return true;
+    }
+
+    // 拦截 1：C99 结构体指定初始化器 (如 .open = my_drm_open)
+    bool VisitDesignatedInitExpr(DesignatedInitExpr *E) {
+        if (E->designators().empty()) return true;
+        
+        auto *Desig = E->getDesignator(0);
+        if (!Desig->isFieldDesignator()) return true;
+
+        FieldDecl *FD = Desig->getFieldDecl();
+        if (!FD) return true;
+
+        // 🌟 极简主义：既然只做 REF 跳转，我们直接调用 processSymbol 把它当作引用记录下来
+        // Desig->getFieldLoc() 能够精准获取到源码中 ".open" 那个单词的位置
+        processSymbol(FD, "REF", Desig->getFieldLoc());
+        
+        return true;
+    }
+
     // --- 新增：处理类型名的引用 (如 device_init_fn, struct nested_dev) ---
     bool VisitTypeLoc(TypeLoc TL) {
         SourceManager &SM = Context.getSourceManager();
@@ -242,6 +282,19 @@ public:
         return true;
     }
 
+    // 拦截 C++ 构造函数初始化列表 : member(val)
+    bool VisitCXXConstructorDecl(CXXConstructorDecl *D) {
+        for (auto *Init : D->inits()) {
+            if (Init->isAnyMemberInitializer()) {
+                if (FieldDecl *FD = Init->getAnyMember()) {
+                    // 记录对成员变量的引用
+                    processSymbol(FD, "REF", Init->getMemberLocation());
+                }
+            }
+        }
+        return true;
+    }
+
     // 拦截重载运算符 (如 a + b, obj->foo)
     bool VisitCXXOperatorCallExpr(CXXOperatorCallExpr *E) {
         if (FunctionDecl *FD = E->getDirectCallee()) {
@@ -253,6 +306,8 @@ public:
 
 
 private:
+
+    //输出usr数据到json
     void processSymbol(NamedDecl *D, std::string role, SourceLocation Loc) {
         SourceManager &SM = Context.getSourceManager();
         Loc = SM.getSpellingLoc(Loc);
@@ -323,7 +378,7 @@ protected:
     std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI, StringRef InFile) override { return std::make_unique<IndexerConsumer>(CI.getASTContext()); }
 };
 
-static llvm::cl::OptionCategory MyToolCategory("PyClangd-Core Options");
+
 int main(int argc, const char **argv) {
     auto ExpectedParser = CommonOptionsParser::create(argc, argv, MyToolCategory);
     if (!ExpectedParser) return 1;
