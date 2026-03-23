@@ -157,6 +157,10 @@ class Database:
         return commands_map
 
     # --- 增量更新的三大核心原子操作 ---
+    def show_res(self, res):
+        for index, r in enumerate(res, start=1):
+            logger.info(f"✅ {index:<8}:{r[0]}:{r[1]}:{r[2]}:{r[3]}:{r[4]}")
+
     @with_retry()
     def update_file_status(self, file_path, mtime, status, commit=True):
         """更新文件状态：indexing, completed, failed"""
@@ -202,25 +206,26 @@ class Database:
 
     def lsp_document_symbols_db(self, file_path):
         #mytodo bug需要修复，获取符号表
+        logger.info(f"👉 获取符号表: {file_path}")
         self.cursor.execute('''
             SELECT name, kind, s_line, s_col, e_line, e_col 
             FROM symbols
             WHERE file_path = ? AND role = 'def' ORDER BY s_line ASC
         ''', (file_path,))
-        return self.cursor.fetchall()
+        ret = self.cursor.fetchall()
+        return ret
 
     def lsp_workspace_symbols_db(self, query):
     # 全局搜索关键字
+        logger.info(f"👉 全局搜索CTRL+T: {query}")
         self.cursor.execute('''
             SELECT name, file_path, s_line, s_col, usr 
             FROM symbols
             WHERE name LIKE ? AND role = 'def' LIMIT 100
         ''', (f"%{query}%",))
-        return self.cursor.fetchall()
-
-    def show_res(self, res):
-        for index, r in enumerate(res, start=1):
-            logger.info(f"✅ {index:>8}:{r[0]}:{r[1]}:{r[2]}:{r[3]}:{r[4]}")
+        ret = self.cursor.fetchall()
+        self.show_res(ret)
+        return ret
 
     def lsp_definition_db(self, file_path, line, col):
         # 获取定义
@@ -270,10 +275,10 @@ class Database:
             logger.info(f"找到引用usr={usr}")
             res = self.get_references_by_usr(usr)
             if res:
-                logger.info(f"✅ 查找引用结果: 找到 {len(res)} 个定义")
+                logger.info(f"✅ 查找引用结果: 找到 {len(res)} 个引用")
                 self.show_res(res)
             else:
-                logger.info(f"❌ 查找引用失败: 坐标未命或未找到定义")
+                logger.info(f"❌ 查找引用失败: 坐标未命或未找到引用")
             return res
         else:
             logger.info(f"没有找到:{file_path}:{line}:{col}的usr")
@@ -286,7 +291,7 @@ class Database:
         res = self.cursor.fetchone()
         
         if res and res[0] == current_md5:
-            logger.info(f"主文件未变，跳过: {file_path}")
+            logger.info(f"主文件未变，跳过编译: {file_path}")
             return
 
         logger.info(f"开始增量分析并更新: {file_path}")
