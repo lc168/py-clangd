@@ -227,23 +227,88 @@ class Database:
         self.show_res(ret)
         return ret
 
+
+    def get_string_at_location(self, file_path, line, col):
+        """
+        获取文件中指定行列(坐标)处被包裹的字符串。
+        带有完整的异常路径日志输出。
+        """
+        logger.info(f"🔍 尝试在源码提取字符串 -> {file_path}:{line}:{col}")
+        try:
+            if not os.path.exists(file_path):
+                logger.warning(f"❌ 提取字符串失败: 物理文件不存在 [{file_path}]")
+                return None
+                
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                # 遍历找到目标行
+                for i, current_line in enumerate(f):
+                    if i + 1 == line:
+                        target_line = current_line
+                        break
+                else:
+                    logger.warning(f"❌ 提取字符串失败: 请求行号 [{line}] 超出了文件总行数")
+                    return None
+                    
+            idx = col - 1
+            if idx < 0 or idx >= len(target_line):
+                logger.warning(f"❌ 提取字符串失败: 列号 [{col}] 越界 (当前行长度: {len(target_line)})")
+                return None
+                
+            valid_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+            
+            if target_line[idx] not in valid_chars:
+                # 尝试向左或向右偏移寻找有效字符
+                if idx + 1 < len(target_line) and target_line[idx + 1] in valid_chars:
+                    logger.info(f"⚠️ 坐标恰好落在边界/括号上，向右偏移 1 个字符")
+                    idx += 1
+                elif idx - 1 >= 0 and target_line[idx - 1] in valid_chars:
+                    logger.info(f"⚠️ 坐标恰好落在边界/括号上，向左偏移 1 个字符")
+                    idx -= 1
+                else:
+                    logger.warning(f"❌ 提取字符串失败: 坐标处的字符 '{target_line[idx]}' 不是合法的标识符组成部分")
+                    return None
+
+            # 双向扩展
+            left = idx
+            right = idx
+            
+            while left > 0 and target_line[left - 1] in valid_chars:
+                left -= 1
+            while right < len(target_line) - 1 and target_line[right + 1] in valid_chars:
+                right += 1
+                
+            extracted_str = target_line[left:right+1].strip()
+            
+            if extracted_str:
+                logger.info(f"✅ 成功从源码中提取到字符串: '{extracted_str}'")
+                return extracted_str
+                
+            logger.warning("❌ 提取字符串失败: 提取结果为空字符串")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ 提取字符串时发生崩溃级异常: {e}")
+            return None
+
     def lsp_definition_db(self, file_path, line, col):
         # 获取定义
         """查定义核心逻辑：优先头文件跳转，后查 USR 跳跃（适配 Symbols 单表融合版架构）"""
         logger.info(f"👉 发起跳转: {file_path}:{line}:{col}")
-        self.cursor.execute('''
-            SELECT role, usr FROM symbols
-            WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
-            ''', (file_path, line, col, col))
-
-        res = self.cursor.fetchone()
+        res = self.get_usr_at_location(file_path, line, col)
         logger.info(f"查询usr结果: {res}")
 
         if not res:
-            logger.info(f"❌查找usr失败")
-            return []
-        role, target_str = res
+            logger.info(f"❌查找usr失败，添加字符串查找来兜底")
+            # 添加字符串查找来兜底
+            # 获取鼠标所在的字符串
+            target_str = self.get_string_at_location(file_path, line, col)
+            # 调用字符串查找函数
+            ret = self.get_definitions_by_name(target_str)
+            logger.info(f"查询字符串结果: {len(ret)}个")
+            self.show_res(ret)
+            return ret
 
+        role, target_str = res
         if role == 'inc':
             logger.info(f"✅ 找到头文件: {target_str}")
             # 头文件路径直接就存在了 target_str 中
@@ -302,6 +367,7 @@ class Database:
 
         dirty_headers = []
         for inc_file in dependencies:
+            logger.info(f"发现依赖文件: {inc_file}")
             if not os.path.exists(inc_file): continue
             
             inc_current_md5 = self.get_file_md5(inc_file)
@@ -311,19 +377,25 @@ class Database:
             # 如果变脏了，立刻清理它曾经产生的所有符号！
             if not inc_old_md5_res or inc_old_md5_res[0] != inc_current_md5:
                 dirty_headers.append(inc_file)
+                logger.info(f"删除头文件变脏的符号: {inc_file}")
                 self.cursor.execute('DELETE FROM symbols WHERE file_path = ?', (inc_file,))
         
         self.conn.commit()
         
         if dirty_headers:
             logger.info(f"检测到 {len(dirty_headers)} 个头文件发生变化，已清理旧幽灵符号。")
-
+        logger.info(f"开始重新索引: {file_path}")
         def reindex_task():
             cmd_info = self.commands_map.get(file_path)
-            if not cmd_info: return
+            if not cmd_info: 
+                logger.info(f"没有找到编译命令: {file_path}")
+                return
             status, source_file = self.index_worker(cmd_info)
             if status == "SUCCESS":
                 logger.info(f"✅ 更新成功: {source_file}")
+                # 缺少保存会数据库和文件状态更新的动作？
+            else:
+                logger.info(f"❌ 更新失败: {source_file}")
 
         reindex_task()
         #threading.Thread(target=reindex_task, daemon=True).start()
@@ -337,8 +409,8 @@ class Database:
     def lsp_code_action_db(self, file_path, line, col):
         # mymark lsp_code_action_db 目前只看是不是宏，这个功能基本是正常的！
         """查支持的 Code Action 操作 (目前只看是不是宏)"""
-        usr = self.get_usr_at_location(file_path, line, col)
-        if usr and self.is_macro(usr):
+        ret = self.get_usr_at_location(file_path, line, col)
+        if ret and ret[1] and self.is_macro(ret[1]):
             return "expand_macro"
         return None
 
@@ -353,16 +425,11 @@ class Database:
         # 匹配逻辑：s_line == line 且 s_col <= col <= e_col
         # ⭐ 优化：优先匹配 role != 'def' (引用处)，并按宽度升序排列 (最精准的优先)
         self.cursor.execute('''
-            SELECT usr FROM symbols
-            WHERE file_path = ? AND s_line = ? AND s_col <= ? AND (s_line != e_line OR e_col >= ?) AND role != 'inc'
-            ORDER BY 
-                (CASE WHEN kind = 'MACRO_DEFINITION' THEN 0 ELSE 1 END),
-                (CASE WHEN role = 'def' THEN 1 ELSE 0 END), 
-                (e_col - s_col) ASC
-            LIMIT 1
-        ''', (file_path, line, col, col))
+            SELECT role, usr FROM symbols
+            WHERE file_path = ? AND s_line = ? AND s_col <= ? AND e_col >= ?
+            ''', (file_path, line, col, col))
         res = self.cursor.fetchone()
-        return res[0] if res else None
+        return res
 
     def get_definitions_by_usr(self, usr):
         # myark 这个函数在项目中没有使用，但是在其他测试验证文件中使用了
@@ -378,7 +445,7 @@ class Database:
         # 这个是查询所有引的的关键函数
         self.cursor.execute('''
             SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
-            FROM symbols WHERE usr = ? AND role IN ('ref', 'def')
+            FROM symbols WHERE usr = ? AND role = 'ref'
         ''', (usr,))
         return self.cursor.fetchall()
 
@@ -388,10 +455,19 @@ class Database:
         self.cursor.execute('''
             SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
             FROM symbols
-            WHERE name = ? AND role IN ('ref', 'def')
+            WHERE name = ? AND role = 'ref'
         ''', (name,))
         return self.cursor.fetchall()
 
+    def get_definitions_by_name(self, name):
+        # mymark 这个函数在项目中没有使用，可以删除
+        """查名字对应的所有定义位置 (作为兜底)"""
+        self.cursor.execute('''
+            SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
+            FROM symbols
+            WHERE name = ? AND role = 'def'
+        ''', (name,))
+        return self.cursor.fetchall()
 
     # =========================================================================
     # --- 构建索引与解析体系 (从原来的 pyclangd_server 中抽取) ---
