@@ -63,11 +63,61 @@ export function activate(context: vscode.ExtensionContext) {
 		documentSelector: [
 			{ scheme: 'file', language: 'cpp' },
 			{ scheme: 'file', language: 'c' },
+			// 增加对普通文本或所有文件的支持！
+			{ scheme: 'file', language: 'plaintext' },
+			{ scheme: 'file', pattern: '**/*' } // 或者直接匹配工作区所有文件
 		],
 		// 使用你已经创建好的输出通道
 		outputChannel: outputChannel,
 		// ⭐ 核心配置：开启详细追踪模式
-		traceOutputChannel: outputChannel
+		traceOutputChannel: outputChannel,
+
+		// 👇 添加这个中间件拦截器
+		middleware: {
+			provideDefinition: async (document, position, token, next) => {
+				const result = await next(document, position, token);
+
+				if (!result) {
+					return result;
+				}
+
+				// 拦截 plaintext 或者是没有后缀的日志文件
+				if (document.languageId === 'plaintext' || document.fileName.indexOf('.') === -1) {
+
+					const locations = Array.isArray(result) ? result : [result];
+
+					if (locations.length > 0) {
+						const targetLoc = locations[0];
+
+						// 类型收窄 (Type Guard)
+						const targetUri = 'uri' in targetLoc ? targetLoc.uri : targetLoc.targetUri;
+						const targetRange = 'range' in targetLoc ? targetLoc.range : (targetLoc.targetSelectionRange || targetLoc.targetRange);
+
+						if (!targetUri) {
+							return []; // 防御性编程，并加上大括号满足 ESLint
+						}
+
+						// 强行在最左侧 (ViewColumn.One) 打开
+						const targetDoc = await vscode.workspace.openTextDocument(targetUri);
+
+						await vscode.window.showTextDocument(targetDoc, {
+							viewColumn: vscode.ViewColumn.One,
+							selection: targetRange,
+							preserveFocus: true
+						});
+
+						// 2. 🌟 核心修复：欺骗 VS Code 前端！
+						// 不要返回 []，而是返回一个指向当前鼠标位置的 dummy 坐标。
+						// 这样 VS Code 原生的 F12 会认为目标就在原地，右侧窗口就会死死钉在原地，绝对不会乱跳！
+						const dummyLocation = new vscode.Location(document.uri, position);
+						return [dummyLocation];
+					}
+				}
+
+				// 普通 C/C++ 文件正常放行
+				return result;
+			}
+		}
 	};
 
 	client = new LanguageClient(
