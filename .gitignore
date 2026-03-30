@@ -1,3 +1,5 @@
+libclang.so
+
 # --- Node.js & 前端 ---
 node_modules/
 out/
