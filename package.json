@@ -13,17 +13,32 @@
     "onLanguage:c",
     "onLanguage:cpp",
     "onLanguage:h",
-    "onLanguage:hpp",
-    "onCommand:pyclangd.helloWorld"
+    "onLanguage:hpp"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "pyclangd.helloWorld",
-        "title": "Hello World"
+        "command": "pyclangd.triggerGenerateScope",
+        "title": "🛠️ 解析 Ftrace 生成搜索范围"
+      },
+      {
+        "command": "pyclangd.triggerScopedSearch",
+        "title": "🔍 Ftrace 范围搜索"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "pyclangd.triggerGenerateScope",
+          "group": "navigation@1"
+        },
+        {
+          "command": "pyclangd.triggerScopedSearch",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "PyClangd",
       "properties": {

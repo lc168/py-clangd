@@ -118,7 +118,76 @@ export function activate(context: vscode.ExtensionContext) {
 				return result;
 			}
 		}
+
 	};
+
+	// =========================================================
+	// 模块 2：注册命令 - 解析 Ftrace 生成搜索范围
+	// =========================================================
+	let generateScopeCmd = vscode.commands.registerTextEditorCommand('pyclangd.triggerGenerateScope', async (editor) => {
+		const uri = editor.document.uri;
+		vscode.window.showInformationMessage("🔍 正在解析 Ftrace 日志并映射源文件...");
+
+		// 发送给 Python 后台
+		const result: any = await client.sendRequest('workspace/executeCommand', {
+			command: 'pyclangd.generate_scope',
+			arguments: [{ file_path: uri.fsPath }]
+		});
+
+		if (result && result.error) {
+			vscode.window.showErrorMessage(`❌ 解析失败: ${result.error}`);
+		} else if (result && result.status === "success") {
+			vscode.window.showInformationMessage("🎉 Ftrace 范围文件生成成功！");
+		}
+	});
+
+	// =========================================================
+	// 模块 3：注册命令 - 在 Ftrace 范围内搜索引用 (Peek View)
+	// =========================================================
+	let scopedSearchCmd = vscode.commands.registerTextEditorCommand('pyclangd.triggerScopedSearch', async (editor) => {
+		const position = editor.selection.active;
+		const uri = editor.document.uri;
+
+		// 发送坐标给 Python 后台 (注意：行号列号 +1 对齐 Python 逻辑)
+		const result: any = await client.sendRequest('workspace/executeCommand', {
+			command: 'pyclangd.scoped_search',
+			arguments: [{
+				file_path: uri.fsPath,
+				line: position.line + 1,
+				col: position.character + 1
+			}]
+		});
+
+		if (result && result.error) {
+			vscode.window.showErrorMessage(result.error);
+			return;
+		}
+
+		if (result && result.status === "success" && Array.isArray(result.data)) {
+			const data = result.data;
+			if (data.length === 0) {
+				vscode.window.showInformationMessage("在 Ftrace 作用域内，没有找到该符号的引用。");
+				return;
+			}
+
+			// 把 Python 返回的元组转换为 VS Code 原生的 Location 对象 (行号列号 -1 还原)
+			const locations = data.map((r: any[]) => {
+				const targetUri = vscode.Uri.file(r[0]);
+				const range = new vscode.Range(
+					new vscode.Position(r[1] - 1, r[2] - 1),
+					new vscode.Position(r[3] - 1, r[4] - 1)
+				);
+				return new vscode.Location(targetUri, range);
+			});
+
+			// 呼出 VS Code 原生的“查看引用”悬浮小窗
+			vscode.commands.executeCommand('editor.action.showReferences', uri, position, locations);
+		}
+	});
+
+	// 把这两个命令注册进插件生命周期
+	context.subscriptions.push(generateScopeCmd);
+	context.subscriptions.push(scopedSearchCmd);
 
 	client = new LanguageClient(
 		'pyclangd',

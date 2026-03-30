@@ -25,6 +25,7 @@ import json
 import multiprocessing
 import threading
 import hashlib
+import re
 
 # 配置日志
 logging.basicConfig(
@@ -338,7 +339,7 @@ class Database:
         usr = self.get_usr_at_location(file_path, line, col)
         if usr:
             logger.info(f"找到引用usr={usr}")
-            res = self.get_references_by_usr(usr)
+            res = self.get_references_by_usr(usr[1])
             if res:
                 logger.info(f"✅ 查找引用结果: 找到 {len(res)} 个引用")
                 self.show_res(res)
@@ -414,12 +415,6 @@ class Database:
             return "expand_macro"
         return None
 
-    def lsp_execute_command_db(self, command, args, commands_map):
-        #mymark 以后处理宏展开功能
-        """执行后台复杂指令，比如宏展开"""
-        if command == "pyclangd.expand_macro":
-            return {"error": "Unknown command"}
-
     def get_usr_at_location(self, file_path, line, col):
         """核心：查询特定坐标下的符号 USR (精准跳转的基础)"""
         # 匹配逻辑：s_line == line 且 s_col <= col <= e_col
@@ -445,7 +440,7 @@ class Database:
         # 这个是查询所有引的的关键函数
         self.cursor.execute('''
             SELECT DISTINCT file_path, s_line, s_col, e_line, e_col 
-            FROM symbols WHERE usr = ? AND role = 'ref'
+            FROM symbols WHERE usr = ? AND role IN ('ref', 'def')
         ''', (usr,))
         return self.cursor.fetchall()
 
@@ -710,3 +705,99 @@ class Database:
     def close(self):
         self.conn.close()
 
+
+    def generate_ftrace_scope(self, trace_file_path, output_scope_file=".ftrace_scope.txt"):
+        """
+        功能1：解析 ftrace 日志，提取所有函数名，映射到源文件，并生成范围限制文件。
+        """
+        logger.info(f"🔍 开始解析 ftrace 日志: {trace_file_path}")
+        if not os.path.exists(trace_file_path):
+            logger.error(f"❌ ftrace 文件不存在: {trace_file_path}")
+            return False
+
+        functions = set()
+        # 正则表达式匹配 ftrace 格式：匹配 `|` 后面跟着的单词，直到遇到 `(` 
+        # 例如匹配: "|  do_el0_svc() {" 或 "|          _raw_spin_lock();"
+        pattern = re.compile(r'\|\s*([a-zA-Z0-9_]+)\s*\(')
+
+        try:
+            with open(trace_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    match = pattern.search(line)
+                    if match:
+                        functions.add(match.group(1))
+        except Exception as e:
+            logger.error(f"❌ 读取 trace 文件失败: {e}")
+            return False
+
+        logger.info(f"✅ 从 trace 日志中提取到 {len(functions)} 个不重复的函数名")
+
+        valid_files = set()
+        # 遍历函数名，去数据库里找它们定义在哪些文件里
+        for func in functions:
+            self.cursor.execute('''
+                SELECT DISTINCT file_path FROM symbols 
+                WHERE name = ? AND role = 'def'
+            ''', (func,))
+            res = self.cursor.fetchall()
+            logger.info(f"函数 {func} 定义在 {res} 中")
+            for r in res:
+                valid_files.add(r[0])
+
+        if not valid_files:
+            logger.warning("⚠️ 没有找到任何与这些函数匹配的源文件，可能内核未被完整索引。")
+            return False
+
+        # 将去重后的源文件路径写入临时文件
+        scope_path = os.path.join(self.workspace_dir, output_scope_file)
+        try:
+            with open(scope_path, 'w', encoding='utf-8') as f:
+                for file_path in valid_files:
+                    f.write(file_path + '\n')
+            logger.info(f"🎉 成功生成范围文件 (共包含 {len(valid_files)} 个源文件): {scope_path}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ 写入范围文件失败: {e}")
+            return False
+
+
+    def lsp_scoped_references_db(self, file_path, line, col, scope_file=".ftrace_scope.txt"):
+        """
+        专属功能：限定在 .ftrace_scope.txt 记录的文件范围内，搜索符号的所有引用
+        """
+        logger.info(f"👉 发起右键范围搜索: {file_path}:{line}:{col}")
+        
+        # 1. 检查 scope 文件是否存在
+        scope_path = os.path.join(self.workspace_dir, scope_file)
+        if not os.path.exists(scope_path):
+            logger.warning(f"❌ 范围搜索失败: 找不到 {scope_path}")
+            return {"error": f"找不到范围文件 {scope_file}，请先解析 trace 日志生成范围。"}
+
+        # 2. 加载允许的源文件列表
+        try:
+            with open(scope_path, 'r', encoding='utf-8') as f:
+                allowed_files = set(line.strip() for line in f if line.strip())
+            logger.info(f"🎯 成功加载范围文件，限定 {len(allowed_files)} 个源文件")
+        except Exception as e:
+            logger.error(f"❌ 读取范围文件失败: {e}")
+            return {"error": f"读取范围文件失败: {e}"}
+
+        # 3. 获取光标处的 USR
+        ret = self.get_usr_at_location(file_path, line, col)
+        if not ret:
+            logger.warning("❌ 范围搜索失败: 无法提取光标处符号的 USR (可能未索引)")
+            return {"error": "无法获取当前光标下符号的精准 USR，请确保代码已编译索引。"}
+
+        role, usr = ret
+        # 4. 去数据库拉取该 USR 的所有引用和定义
+        all_refs = self.get_references_by_usr(usr)
+
+        # 5. Python 内存级高速过滤
+        filtered_refs = [r for r in all_refs if r[0] in allowed_files]
+
+        logger.info(f"✅ 范围搜索完成: 总引用数 {len(all_refs)} -> 范围过滤后 {len(filtered_refs)}")
+        if filtered_refs:
+            self.show_res(filtered_refs)
+
+        # 返回成功的数据列表
+        return {"status": "success", "data": filtered_refs}

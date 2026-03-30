@@ -182,64 +182,19 @@ def lsp_references(server: PyClangdServer, params):
         return []
 
 
-@ls.feature(TEXT_DOCUMENT_CODE_ACTION)
-def lsp_code_action(server: PyClangdServer, params: CodeActionParams):
-    """当光标停留在一行上，请求代码操作"""
-    uri = params.text_document.uri
-    file_path = os.path.normpath(uri.replace("file://", ""))
-    
-    line_1 = params.range.start.line + 1
-    col_1 = params.range.start.character + 1
-    
-    if not server.db:
-        return None
-        
-    action_type = server.db.lsp_code_action_db(file_path, line_1, col_1)
-    if action_type == "expand_macro":
-        return [
-            CodeAction(
-                title="🔬 完全展开宏 (py-clangd)",
-                kind=CodeActionKind.RefactorRewrite,
-                command=Command(
-                    title="完全展开宏",
-                    command="pyclangd.expandMacro",
-                    arguments=[uri, params.range.start.line, params.range.start.character]
-                )
-            )
-        ]
-    return None
+@ls.command("pyclangd.scoped_search")
+def handle_scoped_search(server: PyClangdServer, params: ExecuteCommandParams):
+    # args 通常是一个列表，第一项是前端传过来的参数字典
+    # 把任务转发给你 database.py 里的 lsp_execute_command_db
+    logger.info(f"执行范围搜索: {params}")
+    return server.db.lsp_scoped_references_db(params[0].get("file_path"), params[0].get("line"), params[0].get("col"))
 
-import tempfile
-import re
+@ls.command("pyclangd.generate_scope")
+def handle_generate_scope(server: PyClangdServer, params: ExecuteCommandParams):
+    # 同样地，把任务转发给你的 database 处理中心
+    logger.info(f"生成搜索范围文件: {params}")
+    return server.db.generate_ftrace_scope(params[0].get("file_path"))
 
-@ls.feature(WORKSPACE_EXECUTE_COMMAND)
-def lsp_execute_command(server: PyClangdServer, params: ExecuteCommandParams):
-    if params.command == "pyclangd.expandMacro":
-        if not server.db:
-            return
-            
-        res = server.db.lsp_execute_command_db(params.command, params.arguments, server.commands_map)
-        
-        if res and res.get("success"):
-            uri = params.arguments[0] # The URI
-            expanded_text = res["text"]
-            edit = WorkspaceEdit(
-                changes={
-                    uri: [
-                        TextEdit(
-                            range=Range(
-                                start=Position(line=res["s_line"], character=res["s_col"]),
-                                end=Position(line=res["e_line"], character=res["e_col"])
-                            ),
-                            new_text=expanded_text
-                        )
-                    ]
-                }
-            )
-            server.lsp.send_request("workspace/applyEdit", ApplyWorkspaceEditParams(edit=edit, label="展开宏"))
-            logger.info(f"成功展开宏: {expanded_text}")
-        elif res and "error" in res:
-            logger.error(f"Expand macro error: {res['error']}")
 
 def main():
     parser = argparse.ArgumentParser()
